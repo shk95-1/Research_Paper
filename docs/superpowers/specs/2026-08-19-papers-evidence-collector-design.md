@@ -48,7 +48,8 @@ PDF 원문은 내려받지 않는다. 메타데이터, 초록, 요약까지만 �
 ```
 papers/
   __main__.py           python -m papers 진입점
-  cli.py                collect / trend / cite 서브커맨드
+  cli.py                collect / trend / cite 서브커맨드. 인자 파싱과 출력만 담당
+  pipeline.py           collect 파이프라인 조립. 소스 호출 순서와 실패 흡수
   http.py               공용 세션. polite 헤더, 호스트별 지연, 지수 백오프
   cache.py              (source, key) -> 원본 응답 캐시
   store.py              SQLite 스키마, upsert, JSON 덤프
@@ -87,7 +88,9 @@ DOI만 사용하며 `doi`가 없으면 즉시 `None`을 반환한다. Europe PMC
 ### 의존성
 
 새 의존성 없음. `requests`(기존 설치됨)와 표준 라이브러리
-`sqlite3`, `difflib`, `argparse`, `json`, `os`, `time`만 사용한다.
+`sqlite3`, `difflib`, `argparse`, `json`, `os`, `time`, `unittest`만 사용한다.
+pytest는 설치되어 있지 않으므로 테스트는 표준 라이브러리 `unittest`로 작성하고
+`python -m unittest discover -s papers/tests` 로 실행한다.
 제목 유사도는 `difflib.SequenceMatcher`로 계산한다. `rapidfuzz`는 도입하지 않는다.
 
 ## 6. 파이프라인
@@ -96,8 +99,10 @@ DOI만 사용하며 `doi`가 없으면 즉시 `None`을 반환한다. Europe PMC
 [입력: 검색 키워드 + 연도 범위 + 개수 상한]
    ↓
 1) OpenAlex 검색 -> 논문 리스트 (doi, title, year, abstract, cited_by_count, is_retracted)
+   - filter=title_and_abstract.search:<query> 를 사용한다 (아래 실측 근거 참조)
+   - select= 로 필요한 필드만 요청해 응답 크기를 줄인다
+   - cursor 페이지네이션으로 limit까지 수집한다
    - abstract_inverted_index를 일반 텍스트로 복원
-   - limit > 25면 cursor 페이지네이션 사용
    ↓
 2) Semantic Scholar 조회 (DOI 기준) -> tldr, abstract, citationCount 보강
    ↓
@@ -226,9 +231,11 @@ DOI 기반 조회를 건너뛰므로 자연히 낮은 점수를 받는다
 
 `SEMANTIC_SCHOLAR_API_KEY`가 설정되면 Semantic Scholar 간격을 0.2s로 낮춘다.
 
-429와 5xx는 지수 백오프로 재시도한다: 1s, 2s, 4s, 8s. 최대 4회.
-응답에 `Retry-After` 헤더가 있으면 그 값을 우선한다.
-4회 모두 실패하면 해당 소스에 대해 `None`을 반환하고 진행한다.
+429와 5xx는 지수 백오프로 재시도한다: 2s, 4s, 8s, 16s. 최대 5회.
+응답에 `Retry-After` 헤더가 있으면 **그 값을 우선한다**. 실측에서 OpenAlex가
+`Retry-After: 39` ~ `40`을 반환했으므로 짧은 고정 백오프만으로는 복구되지 않는다.
+대기 시간은 60초로 상한을 둔다.
+5회 모두 실패하면 해당 소스에 대해 `None`을 반환하고 진행한다.
 
 캐시는 DOI 단위로 동작하므로 재실행 시 보강 단계가 거의 즉시 끝난다.
 100건 수집 시 첫 실행은 Semantic Scholar 지연 때문에 2~3분이 걸린다.
@@ -278,15 +285,91 @@ python -m papers cite --keyword "skin barrier" --min-confidence 70
 - 소스 모듈이 깨진 응답에 예외를 던지지 않는지
 - CLI 인자 파싱
 
-실제 API를 호출하는 스모크 테스트는 `live` 마커로 분리해 기본 실행에서 제외한다.
+실제 API를 호출하는 스모크 테스트는 `papers/tests/live_smoke.py`로 분리한다.
+`unittest discover`의 기본 패턴이 `test*.py`이므로 이 파일은 자동 수집되지 않는다.
+직접 실행할 때만 네트워크를 사용한다.
 
-## 13. 구현 순서
+## 13. API 실측 결과 (2026-08-19 확인)
 
-1. `http.py` + `cache.py`
-2. `sources/openalex.py` (역색인 복원 포함)
-3. `store.py`
-4. `sources/crossref.py`, `sources/semantic_scholar.py`, `sources/europepmc.py`
-5. `verify.py`
-6. `cli.py` + `__main__.py`
+설계 근거가 된 실제 응답이다. 구현 시 이 필드 경로를 그대로 쓴다.
+
+### 검색 모드 선택
+
+| filter | `cosmetic` 결과 수 |
+|--------|------------------|
+| `fulltext.search` (= 기본 `search=`) | 496,202 |
+| `title_and_abstract.search` | 137,680 |
+
+기본 `search=`는 본문 전문을 뒤지므로 화장품이 스쳐 지나가는 논문까지 잡힌다.
+근거 수집이 목적이므로 `title_and_abstract.search`를 쓴다.
+
+### 초록 확보율
+
+`title_and_abstract.search:cosmetic` 상위 50건 중 `abstract_inverted_index`가
+있는 건은 **36건(72%)**, DOI가 있는 건은 50건(100%)이었다.
+나머지 28%는 Semantic Scholar와 Europe PMC 보강으로 채워야 한다.
+즉 보강 단계는 선택이 아니라 초록 확보의 필수 경로다.
+
+### 필드 경로
+
+OpenAlex (`select` 파라미터 동작 확인, `cursor` 페이지네이션 동작 확인):
+
+- `id` -> `openalex_id` (예: `https://openalex.org/W2618188783`)
+- `doi` -> **`https://doi.org/10.1016/...` 형태의 전체 URL**.
+  Crossref/Semantic Scholar 조회 전에 접두사를 떼어 bare DOI로 정규화해야 한다.
+- `title`, `publication_year`, `is_retracted`, `cited_by_count`, `type`, `language`
+- `open_access.is_oa` -> `is_open_access`
+- `primary_location.source.display_name` -> `journal`
+- `primary_location.source.host_organization_name` -> 출판사
+- `topics[].display_name` -> `topics`
+- `keywords[].display_name` -> `keywords`
+- `authorships[].author.display_name` -> `authors`
+- `abstract_inverted_index` -> `{"단어": [위치, ...]}`. 없으면 `null`
+
+Crossref (`https://api.crossref.org/works/<bare DOI>`):
+
+- **`message.title`은 리스트다.** `[0]`을 꺼내 써야 한다.
+- **`message.container-title`도 리스트다.** 저널명.
+- `message.publisher`, `message.type`, `message.issued.date-parts`
+- 존재하지 않는 DOI는 **404**를 반환한다. 이것이 `crossref_verified=false`의 근거다.
+- `message.abstract`는 대체로 없다. Crossref는 초록 보강용이 아니다.
+
+Semantic Scholar (`/paper/DOI:<bare DOI>?fields=...`):
+
+- **`tldr`은 문자열이 아니라 `{"model": ..., "text": ...}` 객체다.**
+  `tldr.text`를 꺼내야 한다.
+- `abstract`는 `tldr`이 있어도 `null`일 수 있다. 서로 독립이다.
+- `citationCount`가 OpenAlex `cited_by_count`와 다르다 (실측 1341 vs 1805).
+  `citation_count`는 **OpenAlex 값을 우선**하고, 없을 때만 S2 값으로 채운다.
+- `venue`, `year`, `externalIds`, `isOpenAccess`
+
+Europe PMC (`/search?query=DOI:"<bare DOI>"&format=json&resultType=core`):
+
+- `resultType=core`가 없으면 초록이 오지 않는다.
+- `resultList.result[].abstractText` -> 초록
+- `resultList.result[].journalInfo.journal.title` -> 저널명
+- **`resultList.result[].keywordList.keyword`는 리스트다.**
+- `hitCount`가 0이면 미발견
+
+### 레이트 리밋 실측
+
+OpenAlex가 연속 호출에서 429를 반환하며 `Retry-After: 39`, `Retry-After: 40`을
+줬다. 고정 백오프 1/2/4/8초로는 복구되지 않는다. `Retry-After`를 반드시 존중한다.
+
+응답 `meta`에 `cost_usd` 필드가 있다 (실측 `0.001`). OpenAlex가 사용량을
+계량한다는 뜻이므로 `select`로 응답을 줄이고 캐시를 적극적으로 쓴다.
+
+## 14. 구현 순서
+
+1. `http.py`
+2. `store.py` (papers + cache 테이블)
+3. `cache.py`
+4. `sources/openalex.py` (역색인 복원 포함)
+5. `sources/crossref.py`
+6. `sources/semantic_scholar.py`
+7. `sources/europepmc.py`
+8. `verify.py`
+9. `pipeline.py`
+10. `cli.py` + `__main__.py`
 
 각 단계는 테스트를 먼저 작성한다.
