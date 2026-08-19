@@ -1,4 +1,4 @@
-# cosmetics
+# cosmetics_research_paper
 
 화장품 트렌드 분석 작업 공간.
 
