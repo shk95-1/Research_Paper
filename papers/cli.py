@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 from . import http, pipeline, store
-from .sources import europepmc, openalex
+from .sources import europepmc, openalex, pubmed
 
 RECENT_YEARS = 10
 DEFAULT_LIMIT = 25
@@ -57,8 +57,9 @@ def parse_args(argv):
         help="막대그래프 대신 period,count CSV 를 이 경로에 쓴다",
     )
     trend.add_argument(
-        "--source", choices=("openalex", "europepmc"), default="openalex",
-        help="어디서 셀지. openalex 는 유료 예산이 필요하고 europepmc 는 무료다",
+        "--source", choices=("openalex", "europepmc", "pubmed"), default="openalex",
+        help="어디서 셀지. openalex 는 유료 예산이 필요하고 나머지 둘은 무료다. "
+             "세 소스의 수치는 서로 호환되지 않는다",
     )
 
     cite = subparsers.add_parser("cite", help="저장된 논문 검색 (근거 인용용)")
@@ -114,10 +115,10 @@ def _run_trend(args):
     _check_email()
     source = getattr(args, "source", "openalex")
     if getattr(args, "monthly", False):
-        module = europepmc if source == "europepmc" else openalex
+        module = {"europepmc": europepmc, "pubmed": pubmed}.get(source, openalex)
         counts = module.monthly_trend(args.query, args.year_from, args.year_to)
-    elif source == "europepmc":
-        raise SystemExit("--source europepmc 는 --monthly 와 함께 써야 합니다.")
+    elif source != "openalex":
+        raise SystemExit(f"--source {source} 는 --monthly 와 함께 써야 합니다.")
     else:
         counts = openalex.trend(args.query, args.year_from, args.year_to)
     if not counts:

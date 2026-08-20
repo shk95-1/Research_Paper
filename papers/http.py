@@ -50,6 +50,7 @@ MIN_INTERVAL = {
     "api.crossref.org": 0.1,
     "www.ebi.ac.uk": 0.2,
     "api.semanticscholar.org": 1.2,  # 키 없을 때 기준. 키가 있으면 아래에서 낮춘다
+    "eutils.ncbi.nlm.nih.gov": 0.34,  # 키 없이 초당 3회가 NCBI 의 상한이다
 }
 DEFAULT_INTERVAL = 0.5
 SEMANTIC_SCHOLAR_HOST = "api.semanticscholar.org"
