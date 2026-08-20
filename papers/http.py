@@ -9,8 +9,12 @@
   2. 호스트별 최소 간격을 지킨다. 상대 서버가 우리를 차단할 이유를 만들지 않는다.
   3. 429/5xx 는 재시도한다. Retry-After 가 있으면 그 값이 지수 백오프를 이긴다.
      OpenAlex 는 실측에서 Retry-After: 39~40 을 준다. 1/2/4/8 초로는 복구되지 않는다.
-  4. 어떤 실패도 예외로 밖에 내보내지 않는다. None 을 돌려주고 호출자가 이어간다.
+  4. 어떤 실패도 예외로 밖에 내보내지 않는다. 호출자가 이어간다.
      논문 한 건의 보강 실패가 100건 수집을 중단시켜서는 안 된다.
+  5. 다만 '없음'과 '못 물어봤음'은 구분해서 돌려준다. 404 는 None, 재시도 소진과
+     예상치 못한 상태와 잘린 본문은 TRANSIENT 다. 둘 다 falsy 라 기존 호출부는
+     그대로 동작하고, 캐시만 이 차이를 본다. 구분이 없으면 레이트리밋 한 번이
+     그 논문을 영구히 '없음'으로 못 박는다.
 """
 
 import os
@@ -20,6 +24,24 @@ from urllib.parse import urlsplit
 
 import requests
 
+class _Transient:
+    """물어보지 못한 것. 없는 것이 아니다.
+
+    falsy 라서 `if not payload` 로 쓰는 호출부는 None 과 똑같이 취급하지만,
+    `is TRANSIENT` 로 물으면 구분된다. cache.fetch 가 이걸 보고 저장을 건너뛴다.
+    """
+
+    __slots__ = ()
+
+    def __bool__(self):
+        return False
+
+    def __repr__(self):
+        return "TRANSIENT"
+
+
+TRANSIENT = _Transient()
+
 USER_AGENT_BASE = "cosmetics-papers/0.1"
 
 # 호스트별 최소 요청 간격(초)
@@ -28,6 +50,7 @@ MIN_INTERVAL = {
     "api.crossref.org": 0.1,
     "www.ebi.ac.uk": 0.2,
     "api.semanticscholar.org": 1.2,  # 키 없을 때 기준. 키가 있으면 아래에서 낮춘다
+    "eutils.ncbi.nlm.nih.gov": 0.34,  # 키 없이 초당 3회가 NCBI 의 상한이다
 }
 DEFAULT_INTERVAL = 0.5
 SEMANTIC_SCHOLAR_HOST = "api.semanticscholar.org"
@@ -110,7 +133,7 @@ def get_json(url, params=None, headers=None, timeout=40):
                 return response.json()
             except ValueError:
                 warn(f"{host}: JSON 파싱 실패")
-                return None
+                return TRANSIENT  # 잘린 본문은 다음 번에 멀쩡할 수 있다
 
         if response.status_code == 404:
             return None  # 미발견은 실패가 아니다. 재시도하지 않는다
@@ -125,7 +148,7 @@ def get_json(url, params=None, headers=None, timeout=40):
             continue
 
         warn(f"{host}: 예상치 못한 상태 {response.status_code}")
-        return None
+        return TRANSIENT
 
     warn(f"{host}: {MAX_RETRIES}회 재시도 실패, 건너뜁니다")
-    return None
+    return TRANSIENT

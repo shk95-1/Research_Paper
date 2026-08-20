@@ -111,3 +111,28 @@ class FetchTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MonthlyTrendTest(unittest.TestCase):
+    def test_asks_once_per_month_and_reads_the_hit_count(self):
+        payloads = [{"hitCount": n} for n in range(1, 13)]
+        with mock.patch.object(europepmc.http, "get_json", side_effect=payloads) as get_json:
+            counts = europepmc.monthly_trend("cosmetic", 2024, 2024)
+        self.assertEqual(get_json.call_count, 12)
+        self.assertEqual(counts[0], ("2024-01", 1))
+        self.assertEqual(counts[-1], ("2024-12", 12))
+
+    def test_bounds_each_month_on_its_real_last_day(self):
+        with mock.patch.object(europepmc.http, "get_json", return_value={"hitCount": 0}) as g:
+            europepmc.monthly_trend("cosmetic", 2024, 2024)
+        # 2024 는 윤년이다. 2월을 28일로 끊으면 하루치가 사라진다.
+        self.assertIn("2024-02-29", g.call_args_list[1].kwargs["params"]["query"])
+
+    def test_drops_a_month_it_could_not_ask_about(self):
+        payloads = [{"hitCount": 5}, europepmc.http.TRANSIENT] + [
+            {"hitCount": 5} for _ in range(10)
+        ]
+        with mock.patch.object(europepmc.http, "get_json", side_effect=payloads):
+            counts = europepmc.monthly_trend("cosmetic", 2024, 2024)
+        self.assertEqual(len(counts), 11)
+        self.assertNotIn("2024-02", [period for period, _ in counts])

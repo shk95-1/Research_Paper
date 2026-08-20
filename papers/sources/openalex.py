@@ -17,13 +17,16 @@ DOI
 
 import os
 
+import calendar
+
 from .. import http
 
 BASE = "https://api.openalex.org/works"
 
 # 쓰는 필드만 요청한다. 응답 meta 에 cost_usd 가 있어 OpenAlex 가 사용량을 계량한다.
 SELECT = ",".join([
-    "id", "doi", "title", "publication_year", "abstract_inverted_index",
+    "id", "doi", "title", "publication_year", "publication_date",
+    "abstract_inverted_index",
     "is_retracted", "cited_by_count", "open_access", "primary_location",
     "topics", "keywords", "authorships", "type", "language",
 ])
@@ -96,6 +99,8 @@ def to_record(work):
         "title": work.get("title"),
         "authors": _authors(work.get("authorships")),
         "year": work.get("publication_year"),
+        # 연도만으로는 월 단위 지표와 붙지 않는다. OpenAlex 는 YYYY-MM-DD 를 준다.
+        "date": work.get("publication_date"),
         "journal": source.get("display_name"),
         "abstract": restore_abstract(work.get("abstract_inverted_index")),
         "tldr": None,  # Semantic Scholar 가 채운다
@@ -109,11 +114,55 @@ def to_record(work):
 
 
 def _filter(query, year_from, year_to):
+    return _date_filter(query, f"{year_from}-01-01", f"{year_to}-12-31")
+
+
+def _date_filter(query, date_from, date_to):
+    """OpenAlex filter 문자열. 절(clause) 구분자가 쉼표라는 점이 중요하다.
+
+    query 에 쉼표가 있으면 서버는 그것을 새 절의 시작으로 읽는다. 결과는 대개
+    4xx 이고 get_json 은 그것을 falsy 로 흡수하므로, 호출자는 '검색 결과 없음'과
+    구별하지 못한 채 빈 목록을 받는다. 조용히 틀리느니 시끄럽게 거절한다.
+    """
+    if "," in query:
+        raise ValueError(
+            f"검색어에 쉼표를 쓸 수 없습니다: {query!r}. "
+            "OpenAlex 는 쉼표를 filter 절 구분자로 읽습니다. 공백으로 나누세요."
+        )
     return ",".join([
         f"title_and_abstract.search:{query}",
-        f"from_publication_date:{year_from}-01-01",
-        f"to_publication_date:{year_to}-12-31",
+        f"from_publication_date:{date_from}",
+        f"to_publication_date:{date_to}",
     ])
+
+
+def monthly_trend(query, year_from, year_to):
+    """[("YYYY-MM", 논문수), ...] 오름차순. 월마다 요청 1회.
+
+    OpenAlex 는 publication_date 로 group_by 하지 못한다. 월 경계를 filter 에 넣고
+    meta.count 만 읽는 편이, 논문을 전부 받아서 세는 것보다 훨씬 싸다. 8년치가
+    96 요청이고 본문은 한 건도 받지 않는다.
+
+    한 달이라도 물어보지 못했으면 그 달은 결과에서 빠진다. 0 으로 채우면 '논문이
+    없었던 달'과 '못 물어본 달'이 같아지고, 그 둘을 시계열에서 되살릴 방법은 없다.
+    """
+    counts = []
+    for year in range(year_from, year_to + 1):
+        for month in range(1, 13):
+            last = calendar.monthrange(year, month)[1]
+            params = _polite({
+                "filter": _date_filter(
+                    query, f"{year}-{month:02d}-01", f"{year}-{month:02d}-{last:02d}"
+                ),
+                "per-page": 1,
+            })
+            payload = http.get_json(BASE, params=params)
+            if not payload:
+                continue
+            count = (payload.get("meta") or {}).get("count")
+            if count is not None:
+                counts.append((f"{year}-{month:02d}", count))
+    return counts
 
 
 def _polite(params):

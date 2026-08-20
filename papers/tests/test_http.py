@@ -107,9 +107,12 @@ class GetJsonTest(unittest.TestCase):
         self.assertEqual(len(session.calls), 2)
         self.sleep.assert_any_call(40.0)
 
-    def test_returns_none_after_exhausting_retries(self):
+    def test_returns_transient_after_exhausting_retries(self):
         result, session = self._run([FakeResponse(503) for _ in range(http.MAX_RETRIES)])
-        self.assertIsNone(result)
+        # None 이 아니라 TRANSIENT 여야 캐시가 이걸 '없음'으로 저장하지 않는다.
+        self.assertIs(result, http.TRANSIENT)
+        # 그러면서 falsy 라 `if not payload` 로 쓰는 호출부는 그대로 동작한다.
+        self.assertFalse(result)
         self.assertEqual(len(session.calls), http.MAX_RETRIES)
 
     def test_survives_network_exception_and_retries(self):
@@ -120,13 +123,15 @@ class GetJsonTest(unittest.TestCase):
         ])
         self.assertEqual(result, {"ok": True})
 
-    def test_returns_none_on_unparsable_json(self):
+    def test_returns_transient_on_unparsable_json(self):
+        # 잘린 본문은 서버가 없다고 답한 것이 아니다. 다음 번에 멀쩡할 수 있다.
         result, _ = self._run([FakeResponse(200, bad_json=True)])
-        self.assertIsNone(result)
+        self.assertIs(result, http.TRANSIENT)
+        self.assertFalse(result)
 
     def test_does_not_retry_unexpected_status(self):
         result, session = self._run([FakeResponse(418)])
-        self.assertIsNone(result)
+        self.assertIs(result, http.TRANSIENT)
         self.assertEqual(len(session.calls), 1)
 
     def test_warns_on_stderr_when_giving_up(self):

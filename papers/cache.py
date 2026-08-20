@@ -11,6 +11,8 @@
 import json
 from datetime import datetime, timezone
 
+from . import http
+
 MISS = object()
 
 
@@ -51,5 +53,9 @@ def fetch(conn, source, key, loader):
     if cached is not MISS:
         return cached
     result = loader()
+    if result is http.TRANSIENT:
+        # 레이트리밋이나 타임아웃은 답이 아니다. 이걸 '없음'으로 저장하면 그 논문은
+        # 영원히 보강되지 않는다. 다음 실행이 다시 물어볼 수 있게 저장하지 않는다.
+        return None
     put(conn, source, key, result)
     return result

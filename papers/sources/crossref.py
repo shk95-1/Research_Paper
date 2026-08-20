@@ -46,7 +46,7 @@ def fetch(doi=None, title=None):
         return None
     payload = http.get_json(BASE + quote(doi, safe="/"), params=_polite())
     if not payload:
-        return None
+        return http.TRANSIENT if payload is http.TRANSIENT else None
     message = payload.get("message")
     if not isinstance(message, dict):
         return None
