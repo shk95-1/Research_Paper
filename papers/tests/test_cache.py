@@ -4,7 +4,7 @@ import os
 import tempfile
 import unittest
 
-from papers import cache, store
+from papers import cache, http, store
 
 
 class CacheTest(unittest.TestCase):
@@ -32,6 +32,26 @@ class CacheTest(unittest.TestCase):
         cache.put(self.conn, "crossref", "10.1/absent", None)
         self.assertIsNone(cache.get(self.conn, "crossref", "10.1/absent"))
         self.assertIsNot(cache.get(self.conn, "crossref", "10.1/absent"), cache.MISS)
+
+    def test_a_transient_failure_is_not_remembered_as_absent(self):
+        # 레이트리밋으로 못 물어본 것을 '없음'으로 저장하면 그 논문은 영원히
+        # 보강되지 않는다. 저장하지 않아야 다음 실행이 다시 묻는다.
+        result = cache.fetch(self.conn, "crossref", "10.1/rate-limited",
+                             lambda: http.TRANSIENT)
+        self.assertIsNone(result)
+        self.assertIs(cache.get(self.conn, "crossref", "10.1/rate-limited"), cache.MISS)
+
+    def test_a_retry_after_a_transient_failure_reaches_the_loader(self):
+        calls = []
+
+        def loader(value):
+            calls.append(value)
+            return value
+
+        cache.fetch(self.conn, "crossref", "10.1/x", lambda: loader(http.TRANSIENT))
+        cache.fetch(self.conn, "crossref", "10.1/x", lambda: loader({"title": "T"}))
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(cache.get(self.conn, "crossref", "10.1/x"), {"title": "T"})
 
     def test_separates_sources_sharing_a_key(self):
         cache.put(self.conn, "crossref", "10.1/a", {"from": "crossref"})

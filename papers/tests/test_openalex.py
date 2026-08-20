@@ -13,6 +13,7 @@ WORK = {
     "doi": "https://doi.org/10.1016/j.yrtph.2017.05.017",
     "title": "Integrating habits and practices data for soaps and cosmetics",
     "publication_year": 2017,
+    "publication_date": "2017-05-18",
     "is_retracted": False,
     "cited_by_count": 1805,
     "type": "article",
@@ -155,6 +156,13 @@ class ToRecordTest(unittest.TestCase):
 
 
 class SearchTest(unittest.TestCase):
+    def test_keeps_the_day_level_publication_date(self):
+        # 연도만 있으면 월 단위 지표와 붙일 수 없다.
+        self.assertEqual(openalex.to_record(WORK)["date"], "2017-05-18")
+
+    def test_requests_the_publication_date_field(self):
+        self.assertIn("publication_date", openalex.SELECT)
+
     def test_builds_a_title_and_abstract_filter_with_the_year_range(self):
         with mock.patch.object(openalex.http, "get_json", return_value={"results": [WORK]}) as get_json:
             openalex.search("cosmetic retinol", 2016, 2026, limit=1)

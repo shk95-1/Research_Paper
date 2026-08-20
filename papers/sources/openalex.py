@@ -23,7 +23,8 @@ BASE = "https://api.openalex.org/works"
 
 # 쓰는 필드만 요청한다. 응답 meta 에 cost_usd 가 있어 OpenAlex 가 사용량을 계량한다.
 SELECT = ",".join([
-    "id", "doi", "title", "publication_year", "abstract_inverted_index",
+    "id", "doi", "title", "publication_year", "publication_date",
+    "abstract_inverted_index",
     "is_retracted", "cited_by_count", "open_access", "primary_location",
     "topics", "keywords", "authorships", "type", "language",
 ])
@@ -96,6 +97,8 @@ def to_record(work):
         "title": work.get("title"),
         "authors": _authors(work.get("authorships")),
         "year": work.get("publication_year"),
+        # 연도만으로는 월 단위 지표와 붙지 않는다. OpenAlex 는 YYYY-MM-DD 를 준다.
+        "date": work.get("publication_date"),
         "journal": source.get("display_name"),
         "abstract": restore_abstract(work.get("abstract_inverted_index")),
         "tldr": None,  # Semantic Scholar 가 채운다

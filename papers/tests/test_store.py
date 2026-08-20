@@ -70,7 +70,7 @@ class PublicRecordTest(unittest.TestCase):
     def test_emits_exactly_the_spec_schema_keys(self):
         messy = record(is_retracted=False, publisher="Elsevier BV")
         expected = [
-            "abstract", "authors", "citation_count", "collected_at", "doi",
+            "abstract", "authors", "citation_count", "collected_at", "date", "doi",
             "is_open_access", "journal", "keywords", "openalex_id", "title",
             "tldr", "topics", "url", "verification", "year",
         ]

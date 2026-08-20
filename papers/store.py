@@ -21,7 +21,7 @@ DEFAULT_JSON = os.path.join(os.path.dirname(__file__), "out", "papers.json")
 
 # 스펙 8절 레코드 스키마. public_record() 가 내보내는 키의 정의이기도 하다.
 RECORD_FIELDS = (
-    "doi", "openalex_id", "title", "authors", "year", "journal", "abstract",
+    "doi", "openalex_id", "title", "authors", "year", "date", "journal", "abstract",
     "tldr", "keywords", "topics", "citation_count", "is_open_access", "url",
     "verification", "collected_at",
 )
@@ -33,7 +33,7 @@ VERIFICATION_FIELDS = (
 )
 
 COLUMNS = (
-    "key", "doi", "openalex_id", "title", "authors", "year", "journal",
+    "key", "doi", "openalex_id", "title", "authors", "year", "date", "journal",
     "abstract", "tldr", "keywords", "topics", "citation_count",
     "is_open_access", "url", "crossref_verified", "title_match",
     "found_in_sources", "is_retracted", "has_doi", "confidence_score",
@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS papers (
     title             TEXT,
     authors           TEXT,
     year              INTEGER,
+    date              TEXT,
     journal           TEXT,
     abstract          TEXT,
     tldr              TEXT,
@@ -67,6 +68,7 @@ CREATE TABLE IF NOT EXISTS papers (
 );
 CREATE INDEX IF NOT EXISTS idx_papers_confidence ON papers(confidence_score DESC);
 CREATE INDEX IF NOT EXISTS idx_papers_year ON papers(year);
+CREATE INDEX IF NOT EXISTS idx_papers_date ON papers(date);
 
 CREATE TABLE IF NOT EXISTS cache (
     source     TEXT,
@@ -86,8 +88,20 @@ def connect(path=DEFAULT_DB):
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    _add_missing_columns(conn)
     conn.commit()
     return conn
+
+
+def _add_missing_columns(conn):
+    """CREATE TABLE IF NOT EXISTS 는 이미 있는 표에 새 열을 붙이지 않는다.
+
+    date 열이 그렇게 추가됐다. 기존 DB 를 지우지 않고 이어 쓰려면 여기서 메운다.
+    """
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(papers)")}
+    for name in COLUMNS:
+        if name not in existing:
+            conn.execute(f"ALTER TABLE papers ADD COLUMN {name} TEXT")
 
 
 def record_key(record):
@@ -117,6 +131,7 @@ def upsert(conn, record):
         "title": clean["title"],
         "authors": json.dumps(clean["authors"], ensure_ascii=False),
         "year": clean["year"],
+        "date": clean["date"],
         "journal": clean["journal"],
         "abstract": clean["abstract"],
         "tldr": clean["tldr"],

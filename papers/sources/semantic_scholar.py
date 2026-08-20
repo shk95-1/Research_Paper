@@ -41,7 +41,7 @@ def fetch(doi=None, title=None):
         BASE + quote(doi, safe="/"), params={"fields": FIELDS}, headers=_headers()
     )
     if not isinstance(payload, dict) or not payload:
-        return None
+        return http.TRANSIENT if payload is http.TRANSIENT else None
     return {
         "title": payload.get("title") or None,
         "abstract": payload.get("abstract") or None,

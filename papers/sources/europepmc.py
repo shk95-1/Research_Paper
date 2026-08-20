@@ -44,6 +44,8 @@ def fetch(doi=None, title=None):
         "resultType": "core",
         "pageSize": 1,
     })
+    if payload is http.TRANSIENT:
+        return http.TRANSIENT
     hits = ((payload or {}).get("resultList") or {}).get("result") or []
     if not hits or not isinstance(hits[0], dict):
         return None
