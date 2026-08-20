@@ -123,6 +123,13 @@ def _run_trend(args):
     if not counts:
         print("결과가 없습니다.")
         return 0
+    if getattr(args, "csv_path", None):
+        with open(args.csv_path, "w", encoding="utf-8", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(["period", "count"])
+            writer.writerows(counts)
+        print(f"{args.csv_path} 에 {len(counts)}행을 썼습니다.")
+        return 0
     print(f"검색: {args.query!r}  기간: {args.year_from}~{args.year_to}\n")
     widest = max(count for _, count in counts) or 1
     for period, count in counts:
