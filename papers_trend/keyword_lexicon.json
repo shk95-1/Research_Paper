@@ -1,0 +1,219 @@
+{
+  "_comment": "키워드 표준화 사전. 지표 산출은 이 사전에만 의존한다. 정규화 규칙을 코드에 하드코딩하지 않는다. 사전에 한 번 등록된 표현은 이후 입력 형태와 무관하게 인식된다. 코드 수정 없이 이 파일만 키운다.",
+
+  "_key_rule": "표준키는 대문자 스네이크. 이 키가 집계 결과의 식별자다. 한 번 정하면 바꾸지 않는다 (바꾸면 과거 CSV 와 조인이 깨진다).",
+
+  "_aliases_rule": "단복수는 aliases 에 양쪽을 다 넣는다. 형태소 분석기나 스테머를 쓰지 않는다. 스테머는 'aging'과 'agent'를 같은 어간으로 묶는 식의 조용한 오류를 낸다.",
+
+  "_kr_colloquial_rule": "지금은 쓰지 않는다. 비워두더라도 반드시 만든다. 유튜브 댓글 사전(youtube-data-collector/lexicon.json)과 seeds/topics_v0.1.csv 의 한글 주제와 조인할 유일한 다리다. 나중에 붙이려면 사전을 처음부터 다시 만들어야 한다.",
+
+  "_seed_note": "2026-08-20 시드. 실제 데이터에서 unmatched.py 로 발견되는 것으로 계속 채운다. 사람이 검수해서 추가한다.",
+
+  "ZINC_OXIDE": {
+    "canonical_en": "zinc oxide",
+    "aliases": ["zno", "zinc-oxide", "zinc oxides", "nano-zno", "nano zno", "zinc oxide nanoparticle", "zinc oxide nanoparticles"],
+    "category": "uv_filter",
+    "inci_en": "Zinc Oxide",
+    "kr_colloquial": ["징크옥사이드", "징크", "무기자차", "산화아연"]
+  },
+  "TITANIUM_DIOXIDE": {
+    "canonical_en": "titanium dioxide",
+    "aliases": ["tio2", "tio₂", "titanium(iv) oxide", "titania", "titanium dioxides", "nano-tio2", "titanium dioxide nanoparticle", "titanium dioxide nanoparticles"],
+    "category": "uv_filter",
+    "inci_en": "Titanium Dioxide",
+    "kr_colloquial": ["티타늄디옥사이드", "이산화티탄", "무기자차"]
+  },
+  "OCTOCRYLENE": {
+    "canonical_en": "octocrylene",
+    "aliases": ["octocrilene", "oc"],
+    "category": "uv_filter",
+    "inci_en": "Octocrylene",
+    "kr_colloquial": ["옥토크릴렌"]
+  },
+  "AVOBENZONE": {
+    "canonical_en": "avobenzone",
+    "aliases": ["butyl methoxydibenzoylmethane", "bmdbm", "parsol 1789"],
+    "category": "uv_filter",
+    "inci_en": "Butyl Methoxydibenzoylmethane",
+    "kr_colloquial": ["아보벤존"]
+  },
+  "OXYBENZONE": {
+    "canonical_en": "oxybenzone",
+    "aliases": ["benzophenone-3", "benzophenone 3", "bp-3", "obz"],
+    "category": "uv_filter",
+    "inci_en": "Benzophenone-3",
+    "kr_colloquial": ["옥시벤존"]
+  },
+  "SPF": {
+    "canonical_en": "sun protection factor",
+    "aliases": ["spf", "sun-protection factor", "sun protection factors", "sunburn protection factor"],
+    "category": "spec",
+    "kr_colloquial": ["자차수치", "에스피에프"]
+  },
+  "UVA_PROTECTION": {
+    "canonical_en": "UVA protection",
+    "aliases": ["uva", "uv-a", "uva protection", "pa grade", "persistent pigment darkening", "ppd"],
+    "category": "spec",
+    "kr_colloquial": ["피에이", "자외선a"]
+  },
+  "UVB": {
+    "canonical_en": "UVB radiation",
+    "aliases": ["uvb", "uv-b", "uvb radiation", "ultraviolet b"],
+    "category": "spec",
+    "kr_colloquial": ["자외선b"]
+  },
+  "ULTRAVIOLET": {
+    "canonical_en": "ultraviolet radiation",
+    "aliases": ["uv", "ultraviolet", "uv radiation", "ultraviolet radiation", "uv light", "ultraviolet light"],
+    "category": "spec",
+    "kr_colloquial": ["자외선"]
+  },
+  "PHOTOPROTECTION": {
+    "canonical_en": "photoprotection",
+    "aliases": ["photo-protection", "photoprotective", "photoprotection mechanism", "photoprotective effect"],
+    "category": "mechanism",
+    "kr_colloquial": ["광보호"],
+    "note": "이 말뭉치에서 두 갈래다. 선크림 광보호와 식물 광합성 광보호(NPQ)가 같은 단어를 쓴다. 별도 키로 쪼개지 않는다 — 표기가 동일해서 키워드만으로는 구분할 수 없다. topics 로 걸러야 한다."
+  },
+  "HYALURONIC_ACID": {
+    "canonical_en": "hyaluronic acid",
+    "aliases": ["ha", "hyaluronan", "sodium hyaluronate", "hyaluronic acids"],
+    "category": "ingredient",
+    "inci_en": "Hyaluronic Acid",
+    "kr_colloquial": ["히알루론산", "히알루론"]
+  },
+  "NIACINAMIDE": {
+    "canonical_en": "niacinamide",
+    "aliases": ["niacinamides"],
+    "category": "ingredient",
+    "inci_en": "Niacinamide",
+    "kr_colloquial": ["나이아신아마이드", "나이아신"],
+    "note": "NICOTINAMIDE 와 합치지 않는다. 아래 항목의 주석 참조."
+  },
+  "NICOTINAMIDE": {
+    "canonical_en": "nicotinamide",
+    "aliases": ["nicotinamides", "vitamin b3 amide"],
+    "category": "ingredient",
+    "kr_colloquial": [],
+    "note": "NIACINAMIDE 와 별도 키다. 한국어 표기 변형과 달리 문헌에서 엄밀히 구분되는 맥락이 있다 (nicotinamide 는 NAD 대사·경구 투여 문맥, niacinamide 는 국소 도포 화장품 문맥에서 주로 쓰인다). 합치면 파서는 성공하고 테스트는 초록인데 값만 거짓이 된다. 관계는 기록하되 병합하지 않는다."
+  },
+  "RETINOL": {
+    "canonical_en": "retinol",
+    "aliases": ["retinols", "vitamin a alcohol"],
+    "category": "ingredient",
+    "inci_en": "Retinol",
+    "kr_colloquial": ["레티놀"]
+  },
+  "RETINOID": {
+    "canonical_en": "retinoid",
+    "aliases": ["retinoids", "tretinoin", "retinoic acid", "all-trans retinoic acid", "atra"],
+    "category": "ingredient",
+    "kr_colloquial": ["레티노이드"],
+    "note": "RETINOL 과 별도 키다. retinoid 는 상위 계열명이고 retinol 은 그 안의 한 물질이다."
+  },
+  "SUPEROXIDE_DISMUTASE": {
+    "canonical_en": "superoxide dismutase",
+    "aliases": ["sod", "sods", "superoxide-dismutase", "cu/zn-sod", "cuznsod", "mn-sod", "mnsod", "superoxide dismutases"],
+    "category": "enzyme",
+    "kr_colloquial": []
+  },
+  "EGF": {
+    "canonical_en": "epidermal growth factor",
+    "aliases": ["egf", "epidermal growth factors", "epidermal-growth-factor"],
+    "category": "peptide",
+    "kr_colloquial": ["이지에프", "성장인자"]
+  },
+  "PDRN": {
+    "canonical_en": "polydeoxyribonucleotide",
+    "aliases": ["pdrn", "polydeoxyribonucleotides", "polynucleotide", "pn"],
+    "category": "peptide",
+    "kr_colloquial": ["피디알엔", "연어주사"]
+  },
+  "ANTIOXIDANT": {
+    "canonical_en": "antioxidant",
+    "aliases": ["antioxidants", "anti-oxidant", "anti-oxidants", "antioxidant activity", "antioxidant capacity"],
+    "category": "mechanism",
+    "kr_colloquial": ["항산화"]
+  },
+  "ANTI_AGING": {
+    "canonical_en": "anti-aging",
+    "aliases": ["anti aging", "antiaging", "anti-ageing", "anti ageing", "antiageing", "aging", "ageing", "skin aging", "skin ageing", "photoaging", "photo-aging", "photoageing"],
+    "category": "claim",
+    "kr_colloquial": ["안티에이징", "노화"],
+    "note": "영/미 철자(aging/ageing)를 한 키로 묶는다. photoaging 도 여기 넣었다 — 별도 신호로 보고 싶어지면 키를 쪼개면 된다."
+  },
+  "NANOPARTICLE": {
+    "canonical_en": "nanoparticle",
+    "aliases": ["nanoparticles", "nano-particle", "nano-particles", "nanomaterial", "nanomaterials"],
+    "category": "formulation",
+    "kr_colloquial": ["나노입자"]
+  },
+  "LIPOSOME": {
+    "canonical_en": "liposome",
+    "aliases": ["liposomes", "liposomal", "liposomal delivery", "nanoliposome", "nanoliposomes"],
+    "category": "formulation",
+    "kr_colloquial": ["리포좀"]
+  },
+  "STRATUM_CORNEUM": {
+    "canonical_en": "stratum corneum",
+    "aliases": ["sc", "horny layer"],
+    "category": "anatomy",
+    "kr_colloquial": ["각질층"]
+  },
+  "SKIN_BARRIER": {
+    "canonical_en": "skin barrier",
+    "aliases": ["skin barriers", "epidermal barrier", "barrier function", "skin barrier function", "transepidermal water loss", "tewl"],
+    "category": "mechanism",
+    "kr_colloquial": ["피부장벽", "장벽"]
+  },
+  "MELANIN": {
+    "canonical_en": "melanin",
+    "aliases": ["melanins", "melanogenesis", "melanogenic"],
+    "category": "mechanism",
+    "kr_colloquial": ["멜라닌"]
+  },
+  "TYROSINASE": {
+    "canonical_en": "tyrosinase",
+    "aliases": ["tyrosinases", "tyrosinase inhibition", "tyrosinase inhibitor", "tyrosinase inhibitors"],
+    "category": "enzyme",
+    "kr_colloquial": []
+  },
+  "CERAMIDE": {
+    "canonical_en": "ceramide",
+    "aliases": ["ceramides"],
+    "category": "ingredient",
+    "inci_en": "Ceramide NP",
+    "kr_colloquial": ["세라마이드"]
+  },
+  "PEPTIDE": {
+    "canonical_en": "peptide",
+    "aliases": ["peptides", "bioactive peptide", "bioactive peptides", "oligopeptide", "oligopeptides"],
+    "category": "ingredient",
+    "kr_colloquial": ["펩타이드"]
+  },
+  "CENTELLA": {
+    "canonical_en": "Centella asiatica",
+    "aliases": ["centella", "centella asiatica", "madecassoside", "asiaticoside", "gotu kola"],
+    "category": "ingredient",
+    "kr_colloquial": ["시카", "센텔라", "병풀"]
+  },
+  "MICROBIOME": {
+    "canonical_en": "skin microbiome",
+    "aliases": ["microbiome", "microbiota", "skin microbiota", "skin microbiome", "cutaneous microbiome"],
+    "category": "mechanism",
+    "kr_colloquial": ["마이크로바이옴"]
+  },
+  "CORAL_TOXICITY": {
+    "canonical_en": "coral reef toxicity",
+    "aliases": ["coral", "coral reef", "coral bleaching", "coral reefs", "reef safe", "reef-safe"],
+    "category": "regulatory",
+    "kr_colloquial": [],
+    "note": "선크림 UV 필터의 환경 규제 쟁점. 하와이·팔라우 판매 금지가 이 키워드로 잡힌다."
+  },
+  "ENDOCRINE_DISRUPTION": {
+    "canonical_en": "endocrine disruption",
+    "aliases": ["endocrine disruptor", "endocrine disruptors", "endocrine-disrupting", "edc", "edcs"],
+    "category": "regulatory",
+    "kr_colloquial": ["내분비계 교란"]
+  }
+}

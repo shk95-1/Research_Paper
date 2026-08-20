@@ -1,0 +1,28 @@
+{
+  "_comment": "papers_trend 설정. 검색어와 날짜를 코드에 넣지 않는다. 이 파일만 고쳐서 프로파일을 늘린다.",
+  "_window_note": "명시적 날짜를 쓴다. 롤링 창(예: '36개월 전부터')으로 두면 재실행마다 모집단이 달라져 결과를 재현할 수 없다. 창을 옮길 때는 이 값을 고치고 raw/ 를 새 폴더로 받는다.",
+  "window": {
+    "from": "2023-09-01",
+    "to": "2026-08-31"
+  },
+  "_limit_note": "null 이면 전수 수집. 숫자를 넣으면 그건 표본이므로 _meta.json 의 is_census 가 false 로 기록된다.",
+  "limit": null,
+  "per_page": 200,
+  "_mailto_note": "polite pool 용 연락처를 담은 환경변수 이름. 값이 아니라 이름이다. .env 에서 읽는다.",
+  "mailto_env": "OPENALEX_EMAIL",
+  "_profiles_note": "query_id 는 파일 경로와 모든 집계의 자연키에 들어간다. 영문 소문자와 밑줄만 쓴다. query 는 OpenAlex title_and_abstract.search 문법이다. 공백=AND, OR=OR, 따옴표=구문 (2026-08-20 실측 확인).",
+  "profiles": {
+    "cosmetics": {
+      "query": "cosmetic OR cosmetics OR cosmeceutical OR skincare",
+      "note": "광의. 2026-08-20 실측 59,751건 (2023-09~2026-08)."
+    },
+    "sunscreen": {
+      "query": "sunscreen OR sunblock OR photoprotection OR \"sun protection factor\" OR \"UV filter\"",
+      "note": "협의. 2026-08-20 실측 7,647건. 경고: photoprotection 이 식물·조류 광생물학 논문을 약 19% 끌어온다 (NPQ, 광합성 등). ASSUMPTIONS.md 참조."
+    }
+  },
+  "_provisional_note": "수집일 기준 최근 N개월은 색인이 아직 차지 않았다고 보고 is_provisional=true 로 표시한다. 값이 1인 이유: 2026-08-20 sunscreen 전수 7,623건에서 '최근 3개월 색인 미완' 가설이 반증됐다. 2026-06(319건)과 07(338건)은 직전 6개월 평균(287)보다 오히려 높았다. 낮게 나오는 것은 진행 중인 당월뿐이고, 그것은 색인 미완이 아니라 달이 안 끝났기 때문이다. 3으로 두면 정상적인 달 2개가 prevalence_recent 에서 부당하게 빠진다. ASSUMPTIONS.md 참조. 진짜 반증은 3개월 뒤 재수집이다.",
+  "provisional_months": 1,
+  "_low_sample_note": "그 달 논문 수가 이 값보다 적으면 비율 지표를 신뢰하지 않는다.",
+  "low_sample_threshold": 50
+}
