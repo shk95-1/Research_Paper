@@ -8,6 +8,7 @@ collect 와 trend 는 네트워크를 쓴다. cite 는 로컬 DB 만 읽는다.
 """
 
 import argparse
+import csv
 import os
 from datetime import datetime, timezone
 
@@ -50,6 +51,10 @@ def parse_args(argv):
     trend.add_argument(
         "--monthly", action="store_true",
         help="연도 대신 월별로 센다. 월마다 요청 1회를 쓴다",
+    )
+    trend.add_argument(
+        "--csv", dest="csv_path",
+        help="막대그래프 대신 period,count CSV 를 이 경로에 쓴다",
     )
     trend.add_argument(
         "--source", choices=("openalex", "europepmc"), default="openalex",
