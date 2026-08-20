@@ -222,6 +222,35 @@ class SearchTest(unittest.TestCase):
 
 
 class TrendTest(unittest.TestCase):
+    def test_monthly_trend_asks_once_per_month_and_reads_the_count(self):
+        payloads = [{"meta": {"count": n}} for n in range(1, 25)]
+        with mock.patch.object(openalex.http, "get_json", side_effect=payloads) as get_json:
+            counts = openalex.monthly_trend("retinol", 2024, 2025)
+        self.assertEqual(get_json.call_count, 24)
+        self.assertEqual(counts[0], ("2024-01", 1))
+        self.assertEqual(counts[-1], ("2025-12", 24))
+
+    def test_monthly_trend_bounds_each_month_on_its_real_last_day(self):
+        with mock.patch.object(openalex.http, "get_json", return_value={"meta": {"count": 0}}) as g:
+            openalex.monthly_trend("retinol", 2024, 2024)
+        # 2024 는 윤년이다. 2월을 28일로 끊으면 하루치 논문이 사라진다.
+        february = g.call_args_list[1].kwargs["params"]["filter"]
+        self.assertIn("to_publication_date:2024-02-29", february)
+
+    def test_monthly_trend_drops_a_month_it_could_not_ask_about(self):
+        # 0 으로 채우면 '논문이 없던 달'과 '못 물어본 달'이 구별되지 않는다.
+        payloads = [{"meta": {"count": 5}}, openalex.http.TRANSIENT] + [
+            {"meta": {"count": 5}} for _ in range(10)
+        ]
+        with mock.patch.object(openalex.http, "get_json", side_effect=payloads):
+            counts = openalex.monthly_trend("retinol", 2024, 2024)
+        self.assertEqual(len(counts), 11)
+        self.assertNotIn("2024-02", [period for period, _ in counts])
+
+    def test_a_comma_in_the_query_is_refused_rather_than_silently_breaking(self):
+        with self.assertRaises(ValueError):
+            openalex.monthly_trend("retinol, niacinamide", 2024, 2024)
+
     def test_groups_by_publication_year_and_sorts_ascending(self):
         payload = {"group_by": [
             {"key": "2025", "count": 18737},

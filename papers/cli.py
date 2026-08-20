@@ -47,6 +47,10 @@ def parse_args(argv):
     trend.add_argument("--query", required=True, help="영문 검색어")
     trend.add_argument("--from", dest="year_from", type=int, default=year_from)
     trend.add_argument("--to", dest="year_to", type=int, default=year_to)
+    trend.add_argument(
+        "--monthly", action="store_true",
+        help="연도 대신 월별로 센다. 월마다 요청 1회를 쓴다",
+    )
 
     cite = subparsers.add_parser("cite", help="저장된 논문 검색 (근거 인용용)")
     cite.add_argument("--keyword", required=True)
@@ -99,15 +103,18 @@ def _run_collect(args):
 
 def _run_trend(args):
     _check_email()
-    counts = openalex.trend(args.query, args.year_from, args.year_to)
+    if getattr(args, "monthly", False):
+        counts = openalex.monthly_trend(args.query, args.year_from, args.year_to)
+    else:
+        counts = openalex.trend(args.query, args.year_from, args.year_to)
     if not counts:
         print("결과가 없습니다.")
         return 0
     print(f"검색: {args.query!r}  기간: {args.year_from}~{args.year_to}\n")
     widest = max(count for _, count in counts) or 1
-    for year, count in counts:
+    for period, count in counts:
         bar = "#" * max(1, round(count / widest * 40))
-        print(f"  {year}  {count:>7,}  {bar}")
+        print(f"  {period}  {count:>7,}  {bar}")
     print(f"\n합계 {sum(count for _, count in counts):,}건")
     return 0
 
