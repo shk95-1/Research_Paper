@@ -1,6 +1,14 @@
 # cosmetics_research_paper
 
-화장품 트렌드 분석 작업 공간.
+화장품 트렌드 분석 작업 공간. 논문 쪽 모듈 두 개가 들어 있습니다.
+
+| 모듈 | 목적 | 산출물 |
+|---|---|---|
+| [`papers/`](#papers--논문-근거-수집기) | **근거 확보.** 특정 주장을 뒷받침할 논문을 찾아 검증 | SQLite + JSON |
+| [`papers_trend/`](#papers_trend--논문-키워드-트렌드) | **트렌드 관찰.** 어떤 키워드가 떠오르고 유지되는지 | CSV 5개 |
+
+목적이 다르면 모집단이 다릅니다. `papers/` 는 표적 검색 결과라 모집단이 아니고,
+`papers_trend/` 는 검색어에 걸리는 논문을 전수로 받습니다. 그래서 별도 모듈입니다.
 
 ## papers — 논문 근거 수집기
 
@@ -79,3 +87,46 @@ python -m papers.tests.live_smoke
 의존성은 `requests`와 `python-dotenv`뿐입니다. 나머지는 표준 라이브러리입니다.
 
 설계 문서: [docs/superpowers/specs/2026-08-19-papers-evidence-collector-design.md](docs/superpowers/specs/2026-08-19-papers-evidence-collector-design.md)
+
+---
+
+## papers_trend — 논문 키워드 트렌드
+
+화장품 분야에서 어떤 키워드가 떠오르고 어떤 것이 유지되는지 봅니다.
+OpenAlex 단독으로 전수 수집하고, 월 단위로 집계해 CSV 5개를 냅니다.
+시각화는 이 모듈의 범위가 아닙니다.
+
+현재 데이터: **`sunscreen` 프로파일 전수 7,623건** (2023-09 ~ 2026-08, 36개월).
+
+```bash
+python -m papers_trend.collect_openalex --profile sunscreen   # 네트워크
+python -m papers_trend.aggregate        --profile sunscreen   # CSV 생성
+python -m papers_trend.unmatched        --profile sunscreen   # 사전 확장 후보
+```
+
+산출물은 [`papers_trend/out/`](papers_trend/out/) 에 있습니다.
+
+| 파일 | 알갱이 | 행 |
+|---|---|---|
+| `monthly_denominator.csv` | 월 | 36 |
+| `keyword_monthly.csv` | 키워드 x 월 | 24,584 |
+| `topic_monthly.csv` | 주제 x 월 | 8,540 |
+| `trend_metrics.csv` | 키워드 | 6,455 |
+| `unmatched_sunscreen_keywords.csv` | 미매칭 표현 | 200 |
+
+### 읽기 전에
+
+**컬럼별 설명은 [papers_trend/README.md](papers_trend/README.md) 에 있습니다.**
+그 문서의 첫 세 항목은 caveat 이고, 특히 첫 번째는 수치 해석을 바꿉니다 —
+OpenAlex 키워드 어휘가 2025-10 에 교체되어 `trend_class` 의 `declining` 상당수가
+인공물입니다. 시계열은 `is_in_lexicon = True` 로 걸러서 보세요.
+
+가설과 반증조건, 측정값은 [papers_trend/ASSUMPTIONS.md](papers_trend/ASSUMPTIONS.md)
+에 있습니다. 확인한 것과 가정한 것을 구분해 두었습니다.
+
+### 원본 데이터는 저장소에 없습니다
+
+`papers_trend/raw/` 의 OpenAlex 응답 원본(JSONL 303MB)은 올리지 않았습니다.
+따라서 **CSV 를 이 저장소만으로 재생성할 수 없습니다.** 다시 만들려면
+`collect_openalex` 부터 실행해야 하고, OpenAlex 일일 예산을 씁니다
+(요청당 $0.001, UTC 자정 초기화).
