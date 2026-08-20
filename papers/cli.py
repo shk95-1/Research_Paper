@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 from . import http, pipeline, store
-from .sources import openalex
+from .sources import europepmc, openalex
 
 RECENT_YEARS = 10
 DEFAULT_LIMIT = 25
@@ -50,6 +50,10 @@ def parse_args(argv):
     trend.add_argument(
         "--monthly", action="store_true",
         help="연도 대신 월별로 센다. 월마다 요청 1회를 쓴다",
+    )
+    trend.add_argument(
+        "--source", choices=("openalex", "europepmc"), default="openalex",
+        help="어디서 셀지. openalex 는 유료 예산이 필요하고 europepmc 는 무료다",
     )
 
     cite = subparsers.add_parser("cite", help="저장된 논문 검색 (근거 인용용)")
@@ -103,8 +107,12 @@ def _run_collect(args):
 
 def _run_trend(args):
     _check_email()
+    source = getattr(args, "source", "openalex")
     if getattr(args, "monthly", False):
-        counts = openalex.monthly_trend(args.query, args.year_from, args.year_to)
+        module = europepmc if source == "europepmc" else openalex
+        counts = module.monthly_trend(args.query, args.year_from, args.year_to)
+    elif source == "europepmc":
+        raise SystemExit("--source europepmc 는 --monthly 와 함께 써야 합니다.")
     else:
         counts = openalex.trend(args.query, args.year_from, args.year_to)
     if not counts:

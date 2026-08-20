@@ -10,6 +10,8 @@ resultType=core 를 빼면 초록이 오지 않는다. keywordList.keyword 는 �
 받을 수 있는 단 하나의 통로다.
 """
 
+import calendar
+
 from .. import http
 
 BASE = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
@@ -59,3 +61,37 @@ def fetch(doi=None, title=None):
         "europepmc_id": hit.get("id") or None,
         "is_life_science": True,
     }
+
+
+def monthly_trend(query, year_from, year_to):
+    """[("YYYY-MM", 논문수), ...] 오름차순. 월마다 요청 1회.
+
+    OpenAlex 의 같은 이름 함수와 결과 형태가 같다. 존재 이유는 비용이다.
+    OpenAlex 는 2026-08 기준 요청당 $0.001 을 물리고 무료 예산이 0 이라
+    충전 없이는 한 건도 못 부른다. Europe PMC 는 인증도 과금도 없다.
+
+    대신 범위가 다르다. Europe PMC 는 생명과학 색인이므로 피부과·독성학
+    논문은 잘 잡지만, 재료·화학 쪽 화장품 연구는 OpenAlex 보다 적게 잡힌다.
+    두 소스의 수치를 한 시계열에 섞어 쓰면 안 된다.
+
+    FIRST_PDATE 를 쓴다. 온라인 선공개일이 트렌드 시점에 가깝다.
+    못 물어본 달은 0 이 아니라 빠진다. 0 은 '논문이 없던 달'이라는 뜻이고,
+    그 둘을 나중에 시계열에서 구별할 방법이 없다.
+    """
+    counts = []
+    for year in range(year_from, year_to + 1):
+        for month in range(1, 13):
+            last = calendar.monthrange(year, month)[1]
+            window = f"{year}-{month:02d}-01 TO {year}-{month:02d}-{last:02d}"
+            payload = http.get_json(BASE, params={
+                "query": f"{query} AND (FIRST_PDATE:[{window}])",
+                "format": "json",
+                "resultType": "idlist",
+                "pageSize": 1,
+            })
+            if not payload:
+                continue
+            hits = payload.get("hitCount")
+            if hits is not None:
+                counts.append((f"{year}-{month:02d}", hits))
+    return counts
