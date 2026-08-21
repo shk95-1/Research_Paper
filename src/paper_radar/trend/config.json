@@ -1,5 +1,6 @@
 {
-  "_comment": "papers_trend 설정. 검색어와 날짜를 코드에 넣지 않는다. 이 파일만 고쳐서 프로파일을 늘린다.",
+  "_comment": "trend 설정 (구 papers_trend/config.json 을 T6 에서 그대로 이식). 검색어와 날짜를 코드에 넣지 않는다. 이 파일만 고쳐서 프로파일을 늘린다.",
+  "_provider_note": "이 config.json 의 profiles 는 provider 를 명시하지 않는다 — provider 차원은 이 파일이 아니라 출력 위치(data/raw/{provider}/{query_id}/, out/trend/{query_id}/ 안의 파일명)로 분리된다. 지금은 openalex 가 유일한 provider 다. T15 에서 pubmed 등을 추가할 때도 이 profiles 블록은 provider 중립으로 남기고, provider 별 config 가 필요해지면 그때 이 구조를 넓힌다.",
   "_window_note": "명시적 날짜를 쓴다. 롤링 창(예: '36개월 전부터')으로 두면 재실행마다 모집단이 달라져 결과를 재현할 수 없다. 창을 옮길 때는 이 값을 고치고 raw/ 를 새 폴더로 받는다.",
   "window": {
     "from": "2023-09-01",
