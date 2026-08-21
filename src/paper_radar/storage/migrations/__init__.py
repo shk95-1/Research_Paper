@@ -17,6 +17,7 @@ from paper_radar.storage.migrations import (
     m0001_baseline,
     m0002_runlog,
     m0003_evidence_column,
+    m0004_oa_location,
 )
 
 # (번호, 이름, apply) — apply(conn) 는 반환값 없이 conn 에 스키마 변경을 적용한다.
@@ -24,4 +25,5 @@ MIGRATIONS: tuple[tuple[int, str, Callable[[Connection], None]], ...] = (
     (1, "baseline", m0001_baseline.apply),
     (2, "runlog", m0002_runlog.apply),
     (3, "evidence_column", m0003_evidence_column.apply),
+    (4, "oa_location", m0004_oa_location.apply),
 )

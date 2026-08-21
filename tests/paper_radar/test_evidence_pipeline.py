@@ -16,7 +16,7 @@ from unittest import mock
 
 from paper_radar.contract import Fetch, SourcePolicy
 from paper_radar.evidence import pipeline
-from paper_radar.sources import europepmc, semantic_scholar
+from paper_radar.sources import europepmc, semantic_scholar, unpaywall
 from paper_radar.storage import cache, repository
 from paper_radar.transport.errors import BudgetExhausted
 from paper_radar.transport.http import Transport
@@ -87,6 +87,20 @@ CROSSREF_PAYLOAD = {
         "type": "journal-article",
         "issued": {"date-parts": [[2024]]},
     }
+}
+
+# unpaywall — WORK 의 doi("10.1/a")에 대한 응답. collect() 는 papers 저장이
+# 끝난 뒤 별도 단계로 이걸 조회한다(evidence/verify 에는 들어가지 않는다).
+UNPAYWALL_PAYLOAD = {
+    "doi": "10.1/a",
+    "is_oa": True,
+    "oa_status": "hybrid",
+    "best_oa_location": {
+        "url": "https://example.org/landing",
+        "url_for_pdf": "https://example.org/article.pdf",
+        "host_type": "publisher",
+        "license": "cc-by",
+    },
 }
 
 
@@ -491,6 +505,7 @@ class CollectTest(_DbTestCase):
             _json_response(S2_PAYLOAD),
             _json_response(EPMC_PAYLOAD),
             _json_response(CROSSREF_PAYLOAD),
+            _json_response(UNPAYWALL_PAYLOAD),
             FakeResponse(200),  # collect() 종료 후 같은 transport 로 보내는 요청
         ]
         transport, _ = self._transport(responses)
@@ -517,6 +532,7 @@ class CollectTest(_DbTestCase):
             _json_response(S2_PAYLOAD),
             _json_response(EPMC_PAYLOAD),
             _json_response(CROSSREF_PAYLOAD),
+            _json_response(UNPAYWALL_PAYLOAD),
         ]
         transport, session = self._transport(responses)
 
@@ -526,7 +542,7 @@ class CollectTest(_DbTestCase):
         self.assertEqual(len(report.records), 1)
         self.assertEqual(report.records[0]["verification"]["confidence_score"], 100)
         self.assertEqual(report.stopped_reason, {})
-        self.assertEqual(len(session.calls), 4)
+        self.assertEqual(len(session.calls), 5)
 
         stored_count = self.conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0]
         self.assertEqual(stored_count, 1)
@@ -546,7 +562,7 @@ class CollectTest(_DbTestCase):
         self.assertEqual(openalex_row["errors"], 0)
         self.assertIsNone(openalex_row["stopped_reason"])
 
-        for source in ("semantic_scholar", "europepmc", "crossref"):
+        for source in ("semantic_scholar", "europepmc", "crossref", "unpaywall"):
             row = self.conn.execute(
                 "SELECT * FROM run_source WHERE run_id = ? AND source = ?",
                 (report.run_id, source),
@@ -557,7 +573,19 @@ class CollectTest(_DbTestCase):
         fetch_count = self.conn.execute(
             "SELECT COUNT(*) FROM fetch_log WHERE run_id = ?", (report.run_id,)
         ).fetchone()[0]
-        self.assertEqual(fetch_count, 4)
+        self.assertEqual(fetch_count, 5)
+
+        oa_row = self.conn.execute(
+            "SELECT * FROM oa_location WHERE doi = '10.1/a'"
+        ).fetchone()
+        self.assertEqual(oa_row["pdf_url"], "https://example.org/article.pdf")
+
+        # unpaywall 은 evidence/found_in_sources 어디에도 나타나지 않는다 —
+        # 서지 소스가 아니라 부가 정보다(점수 불변 회귀 테스트는 아래
+        # ScoreInvarianceTest 참고).
+        evidence = report.records[0]["verification"]["evidence"]
+        self.assertNotIn("unpaywall", evidence)
+        self.assertNotIn("unpaywall", report.records[0]["verification"]["found_in_sources"])
 
     def test_returns_no_records_when_the_search_finds_nothing(self):
         transport, _ = self._transport([_search_page([])])
@@ -571,6 +599,7 @@ class CollectTest(_DbTestCase):
             _json_response(S2_PAYLOAD),
             _json_response(EPMC_PAYLOAD),
             _json_response(CROSSREF_PAYLOAD),
+            _json_response(UNPAYWALL_PAYLOAD),
         ]
         transport1, _ = self._transport(list(per_run))
         pipeline.collect(self.conn, transport1, "cosmetic", 2016, 2026, 10)
@@ -587,6 +616,7 @@ class CollectTest(_DbTestCase):
             _json_response(S2_PAYLOAD),
             _json_response(EPMC_PAYLOAD),
             _json_response(CROSSREF_PAYLOAD),
+            _json_response(UNPAYWALL_PAYLOAD),
         ]
         transport, _ = self._transport(responses)
         with quiet():
@@ -601,6 +631,7 @@ class CollectTest(_DbTestCase):
             _json_response(S2_PAYLOAD),
             _json_response(EPMC_PAYLOAD),
             _json_response(CROSSREF_PAYLOAD),
+            _json_response(UNPAYWALL_PAYLOAD),
         ]
         transport, _ = self._transport(responses)
         pipeline.collect(self.conn, transport, "cosmetic", 2016, 2026, 10, json_path=target)
@@ -612,6 +643,7 @@ class CollectTest(_DbTestCase):
             _json_response(S2_PAYLOAD),
             _json_response(EPMC_PAYLOAD),
             _json_response(CROSSREF_PAYLOAD),
+            _json_response(UNPAYWALL_PAYLOAD),
         ]
         transport, _ = self._transport(responses)
         seen = []
@@ -636,6 +668,7 @@ class CollectTest(_DbTestCase):
             _json_response(S2_PAYLOAD),
             _json_response(EPMC_PAYLOAD),
             _json_response(CROSSREF_PAYLOAD),
+            _json_response(UNPAYWALL_PAYLOAD),
         ]
         transport, _ = self._transport(responses)
 
@@ -663,6 +696,7 @@ class CollectTest(_DbTestCase):
             _json_response(S2_PAYLOAD),
             _json_response(EPMC_PAYLOAD),
             _json_response(CROSSREF_PAYLOAD),
+            _json_response(UNPAYWALL_PAYLOAD),  # WORK 의 unpaywall(enrich 완료 후)
             FakeResponse(402),  # WORK2 의 semantic_scholar
         ]
         transport, _ = self._transport(responses)
@@ -689,7 +723,7 @@ class CollectTest(_DbTestCase):
         responses = (
             [_search_page([WORK]), _json_response(S2_PAYLOAD)]
             + [FakeResponse(503) for _ in range(max_attempts)]
-            + [_json_response(CROSSREF_PAYLOAD)]
+            + [_json_response(CROSSREF_PAYLOAD), _json_response(UNPAYWALL_PAYLOAD)]
         )
         transport, _ = self._transport(responses)
 
@@ -704,6 +738,22 @@ class CollectTest(_DbTestCase):
             "SELECT * FROM run WHERE run_id = ?", (report.run_id,)
         ).fetchone()
         self.assertEqual(run_row["status"], "partial")
+
+    def test_skips_oa_resolution_for_a_record_without_a_doi(self):
+        """DOI 없는 논문은 semantic_scholar/crossref 와 마찬가지로 unpaywall
+        도 아예 조회하지 않는다 — oa_location 에 빈 doi 로 행이 생기지 않는다."""
+        work_without_doi = dict(WORK, id="https://openalex.org/W3", doi=None)
+        responses = [_search_page([work_without_doi]), _json_response(EPMC_PAYLOAD)]
+        transport, session = self._transport(responses)
+
+        report = pipeline.collect(self.conn, transport, "cosmetic", 2016, 2026, 10)
+
+        self.assertEqual(len(report.records), 1)
+        # openalex 검색 1회 + europepmc(제목 기반) 1회만 — semantic_scholar/
+        # crossref/unpaywall 은 doi 가 없어 전혀 호출되지 않는다.
+        self.assertEqual(len(session.calls), 2)
+        oa_count = self.conn.execute("SELECT COUNT(*) FROM oa_location").fetchone()[0]
+        self.assertEqual(oa_count, 0)
 
     def test_a_pipeline_bug_leaves_the_run_marked_failed_and_re_raises(self):
         """수집 로직 자체가 처리하지 못한 예외로 끝나면 run.status="failed" 로
@@ -720,6 +770,102 @@ class CollectTest(_DbTestCase):
             "SELECT status FROM run ORDER BY started_at DESC LIMIT 1"
         ).fetchone()
         self.assertEqual(run_row["status"], "failed")
+
+
+class ResolveOaLocationTest(_DbTestCase):
+    """resolve_oa_location() — enrich() 와 동일한 오류×캐시 매트릭스를 unpaywall
+    에 대해 직접 검증한다(collect() 를 거치지 않고 함수 하나만)."""
+
+    def test_returns_none_without_a_doi(self):
+        transport, session = self._transport([])
+        self.assertIsNone(pipeline.resolve_oa_location(self.conn, transport, None))
+        self.assertIsNone(pipeline.resolve_oa_location(self.conn, transport, ""))
+        self.assertEqual(session.calls, [])
+
+    def test_returns_the_record_and_caches_it_on_success(self):
+        transport, _ = self._transport([_json_response(UNPAYWALL_PAYLOAD)])
+        record = pipeline.resolve_oa_location(self.conn, transport, "10.1/a")
+        self.assertTrue(record.is_oa)
+        self.assertEqual(record.pdf_url, "https://example.org/article.pdf")
+
+        # 재실행: 세션에 응답을 하나도 안 주지만 캐시로 처리된다.
+        transport2, session2 = self._transport([])
+        record2 = pipeline.resolve_oa_location(self.conn, transport2, "10.1/a")
+        self.assertEqual(session2.calls, [])
+        self.assertEqual(record2, record)
+
+    def test_a_not_found_response_is_cached_as_a_confirmed_absence(self):
+        transport, _ = self._transport([FakeResponse(404)])
+        with quiet():
+            result = pipeline.resolve_oa_location(self.conn, transport, "10.1/absent")
+        self.assertIsNone(result)
+        cached = cache.get(self.conn, "unpaywall", "10.1/absent")
+        self.assertIsNone(cached)  # MISS 가 아니라 저장된 "없음"
+
+        transport2, session2 = self._transport([])
+        result2 = pipeline.resolve_oa_location(self.conn, transport2, "10.1/absent")
+        self.assertEqual(session2.calls, [])
+        self.assertIsNone(result2)
+
+    def test_a_transient_error_is_not_cached_and_is_counted(self):
+        max_attempts = unpaywall.Unpaywall.policy.max_attempts
+        error_counts: dict[str, int] = {}
+        transport, _ = self._transport([FakeResponse(503) for _ in range(max_attempts)])
+        with quiet():
+            result = pipeline.resolve_oa_location(self.conn, transport, "10.1/x", error_counts)
+        self.assertIsNone(result)
+        self.assertEqual(error_counts["unpaywall"], 1)
+        self.assertIs(cache.get(self.conn, "unpaywall", "10.1/x"), cache.MISS)
+
+    def test_budget_exhausted_propagates_with_the_offending_source_attached(self):
+        transport, _ = self._transport([FakeResponse(402)])
+        with self.assertRaises(BudgetExhausted) as ctx:
+            pipeline.resolve_oa_location(self.conn, transport, "10.1/x")
+        self.assertEqual(ctx.exception.source, "unpaywall")
+        self.assertIs(cache.get(self.conn, "unpaywall", "10.1/x"), cache.MISS)
+
+
+class ScoreInvarianceTest(_DbTestCase):
+    """핵심 회귀 방지: confidence_score(및 evidence/found_in_sources)는
+    unpaywall 조회가 성공하든, 그 논문의 DOI 를 unpaywall 이 모른다고
+    답하든(404) 완전히 동일해야 한다 — unpaywall 은 서지 소스가 아니라
+    부가 정보이므로 점수 산출에 관여해서는 안 된다."""
+
+    def _collect_verification(self, conn, unpaywall_response):
+        responses = [
+            _search_page([WORK]),
+            _json_response(S2_PAYLOAD),
+            _json_response(EPMC_PAYLOAD),
+            _json_response(CROSSREF_PAYLOAD),
+            unpaywall_response,
+        ]
+        transport, _ = self._transport(responses)
+        with quiet():
+            report = pipeline.collect(conn, transport, "cosmetic", 2016, 2026, 10)
+        return report.records[0]["verification"]
+
+    def _second_connection(self):
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        os.unlink(path)
+        conn = repository.connect(path)
+        self.addCleanup(conn.close)
+        self.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
+        return conn
+
+    def test_confidence_score_is_identical_whether_unpaywall_succeeds_or_404s(self):
+        with_success = self._collect_verification(self.conn, _json_response(UNPAYWALL_PAYLOAD))
+
+        not_found_conn = self._second_connection()
+        with_not_found = self._collect_verification(not_found_conn, FakeResponse(404))
+
+        self.assertEqual(with_success["confidence_score"], with_not_found["confidence_score"])
+        self.assertEqual(with_success["found_in_sources"], with_not_found["found_in_sources"])
+        self.assertEqual(with_success["evidence"], with_not_found["evidence"])
+        # evidence/found_in_sources 어디에도 unpaywall 이 없다는 것 자체가
+        # 이 무관성의 구조적 이유다.
+        self.assertNotIn("unpaywall", with_success["evidence"])
+        self.assertNotIn("unpaywall", with_success["found_in_sources"])
 
 
 if __name__ == "__main__":

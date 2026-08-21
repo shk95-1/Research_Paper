@@ -17,9 +17,15 @@ from urllib.parse import urlsplit
 
 from paper_radar import registry
 
-# 등록 부작용 트리거 — registry.SOURCES 를 검사하려면 4개 소스 모듈이 먼저
+# 등록 부작용 트리거 — registry.SOURCES 를 검사하려면 5개 소스 모듈이 먼저
 # import 되어 @register 데코레이터가 실행돼야 한다.
-from paper_radar.sources import crossref, europepmc, openalex, semantic_scholar  # noqa: F401
+from paper_radar.sources import (  # noqa: F401
+    crossref,
+    europepmc,
+    openalex,
+    semantic_scholar,
+    unpaywall,
+)
 
 # test_guards.py 는 tests/paper_radar/ 아래 있다 — parents[0]=paper_radar(tests),
 # [1]=tests, [2]=저장소 루트. cli.py 의 DEFAULT_DB 계산(parents[2], cli.py 는
@@ -89,18 +95,29 @@ def _starts_with_any(target: str, prefixes: tuple[str, ...]) -> bool:
 # 쓴다. transport.errors 는 소스가 앞으로 직접 예외 타입을 잡아야 할 필요에
 # 대비해 허용 집합에 셋으로 남겨 둔다(브리핑 지시) — 지금 실제로 쓰는 곳은
 # 없지만 계약상 열어 둔다. paper_radar.sources 자기 자신은 sources/__init__.py
-# 가 4개 서브모듈을 등록 목적으로 import 하는 것을 허용하기 위함이다.
+# 가 5개 서브모듈을 등록 목적으로 import 하는 것을 허용하기 위함이다.
+# paper_radar.models 는 T8 이 추가한 것 — models.py 는 dataclass 정의만 있는
+# 순수 값 타입 모듈(네트워크·DB·다른 계층 의존 없음)이라 sources 가 만드는
+# 레코드 타입(OaLocationRecord 등, T3 설계 문서가 "저장 계층이 upsert 시
+# 사용할" 것으로 이미 예정해 둔 것)을 소스가 직접 구성해 돌려줘도 계층 방향을
+# 어기지 않는다 — T11~T13 의 향후 소스(TrialRecord/IngredientRecord 등)도
+# 같은 이유로 이 허용을 그대로 쓴다.
 _SOURCES_ALLOWED_PREFIXES = (
     "paper_radar.contract",
     "paper_radar.registry",
     "paper_radar.transport.errors",
     "paper_radar.sources",
+    "paper_radar.models",
 )
 
 # storage/*: T4 규칙 — storage 는 sqlite3 + stdlib 로 독립적이어야 한다(다른
 # 계층에 의존하면 "DB 계층만 떼어 재사용/테스트"가 불가능해진다). 같은 계층
 # 내부 조립(schema<-migrations, repository/runlog<-schema)만 허용.
-_STORAGE_ALLOWED_PREFIXES = ("paper_radar.storage",)
+# paper_radar.models 는 T8 이 추가한 것 — repository.upsert_records() 의
+# TABLE_FOR 가 dataclass 타입(OaLocationRecord 등)을 키로 쓰려면 그 타입을
+# import 해야 한다. models.py 는 storage 를 포함해 어느 계층에도 의존하지
+# 않는 순수 값 타입 모듈이라 이 의존이 역방향 계층 위반을 만들지 않는다.
+_STORAGE_ALLOWED_PREFIXES = ("paper_radar.storage", "paper_radar.models")
 
 # evidence/*, trend/*: 서로의 존재를 몰라야 한다(두 파이프라인은 독립 산출물
 # — SQLite+JSON vs CSV). cli 도 몰라야 한다(cli 는 여러 계층을 조립하는
@@ -217,7 +234,8 @@ class SourceDeclarationConsistencyTest(unittest.TestCase):
         자체가 (import 순서 문제 등으로) 빠지면 위 검사가 0건을 통과시키며
         조용히 무력화된다."""
         self.assertEqual(
-            set(registry.SOURCES), {"openalex", "crossref", "semantic_scholar", "europepmc"}
+            set(registry.SOURCES),
+            {"openalex", "crossref", "semantic_scholar", "europepmc", "unpaywall"},
         )
 
 

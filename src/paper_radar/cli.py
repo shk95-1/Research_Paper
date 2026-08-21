@@ -242,6 +242,9 @@ def _run_cite(args):
             include_retracted=args.include_retracted,
             limit=args.limit,
         )
+        # conn 이 아직 열려 있는 동안 한 번에 배치 조회한다 — conn.close()
+        # 이후 레코드마다 다시 쿼리하는 실수를 구조적으로 피한다.
+        pdf_urls = repository.oa_pdf_urls(conn, (r.get("doi") for r in found))
     finally:
         conn.close()
 
@@ -268,6 +271,12 @@ def _run_cite(args):
             print("    DOI 없음")
         elif record.get("doi"):
             print(f"    https://doi.org/{record['doi']}")
+            # PDF 는 링크만 — 어떤 경로로도 파일을 내려받지 않는다. oa_location
+            # 에 그 DOI 가 없거나 pdf_url 이 없으면(비 OA 등) 아무것도 찍지
+            # 않는다 — 기존 출력은 완전히 그대로다.
+            pdf_url = pdf_urls.get(record["doi"])
+            if pdf_url:
+                print(f"    PDF: {pdf_url}")
         summary = record.get("tldr") or record.get("abstract")
         if summary:
             preview = summary[:ABSTRACT_PREVIEW]

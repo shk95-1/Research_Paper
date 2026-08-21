@@ -2,14 +2,20 @@
 
 papers/tests/test_store.py 의 동등 케이스를 옮겨오고, 이 모듈에서 바뀐
 동작(병합 upsert, is_retracted 최상위 노출, verification 분리 인자)에
-해당하는 케이스를 추가한다.
+해당하는 케이스를 추가한다. T8 이 도입한 upsert_records()/TABLE_FOR(dataclass
+레코드 upsert, papers 밖의 신규 소스가 쓰는 기계)와 oa_pdf_urls() 읽기
+헬퍼도 여기서 검증한다.
 """
 
 import json
 import os
 import tempfile
 import unittest
+from dataclasses import dataclass
+from typing import ClassVar
+from unittest import mock
 
+from paper_radar.models import OaLocationRecord
 from paper_radar.storage import repository, runlog
 
 
@@ -380,6 +386,148 @@ class MergeUpsertTest(unittest.TestCase):
         repository.upsert(self.conn, record(), verification())
         row = self.conn.execute("SELECT evidence FROM papers").fetchone()
         self.assertIsNone(row["evidence"])
+
+
+def oa_record(**overrides):
+    base = {
+        "doi": "10.1/oa",
+        "is_oa": True,
+        "oa_status": "hybrid",
+        "pdf_url": "https://example.org/article.pdf",
+        "landing_url": "https://example.org/landing",
+        "host_type": "publisher",
+        "license": "cc-by",
+        "checked_at": "2026-08-21T00:00:00Z",
+    }
+    base.update(overrides)
+    return OaLocationRecord(**base)
+
+
+@dataclass(frozen=True, slots=True)
+class _FakeTupleRecord:
+    """upsert_records() 의 일반 동작(tuple 직렬화·bool 직렬화·모르는 타입
+    KeyError)을 검증하기 위한 테스트 전용 dataclass — 실제 소스가 만드는
+    타입이 아니다. TABLE_FOR 는 각 테스트에서 mock.patch.dict 로 임시
+    등록한다(프로덕션 TABLE_FOR 를 이 가짜 타입으로 오염시키지 않기 위해)."""
+
+    NATURAL_KEY: ClassVar[tuple[str, ...]] = ("key",)
+
+    key: str
+    tags: tuple[str, ...]
+    active: bool
+
+
+class UpsertRecordsTest(unittest.TestCase):
+    """upsert_records()/TABLE_FOR — dataclass 레코드를 자연키 기준으로 upsert."""
+
+    def setUp(self):
+        handle, self.path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        os.unlink(self.path)
+        self.conn = repository.connect(self.path)
+        self.addCleanup(self._cleanup)
+
+    def _cleanup(self):
+        self.conn.close()
+        if os.path.exists(self.path):
+            os.unlink(self.path)
+
+    def test_inserts_a_new_oa_location_row(self):
+        count = repository.upsert_records(self.conn, [oa_record()])
+        self.assertEqual(count, 1)
+        row = self.conn.execute("SELECT * FROM oa_location WHERE doi = '10.1/oa'").fetchone()
+        self.assertEqual(row["oa_status"], "hybrid")
+        self.assertEqual(row["pdf_url"], "https://example.org/article.pdf")
+        self.assertEqual(row["is_oa"], 1)
+
+    def test_conflicting_natural_key_overwrites_every_column_not_merges_it(self):
+        """"overwrite" 정책 확인의 핵심: papers.upsert() 의 COALESCE 병합과 달리,
+        새 값이 None 이어도(예: 이번엔 PDF 직링크가 없어졌다) 옛 값을 지키지
+        않고 그대로 NULL 로 덮어써야 한다."""
+        repository.upsert_records(self.conn, [oa_record()])
+        repository.upsert_records(
+            self.conn,
+            [
+                oa_record(
+                    is_oa=False,
+                    oa_status="closed",
+                    pdf_url=None,
+                    landing_url=None,
+                    host_type=None,
+                    license=None,
+                    checked_at="2026-08-22T00:00:00Z",
+                )
+            ],
+        )
+        count = self.conn.execute("SELECT COUNT(*) FROM oa_location").fetchone()[0]
+        self.assertEqual(count, 1, "같은 doi 는 한 행으로 유지되어야 한다")
+        row = self.conn.execute("SELECT * FROM oa_location WHERE doi = '10.1/oa'").fetchone()
+        self.assertEqual(row["oa_status"], "closed")
+        self.assertIsNone(row["pdf_url"])
+        self.assertEqual(row["is_oa"], 0)
+        self.assertEqual(row["checked_at"], "2026-08-22T00:00:00Z")
+
+    def test_serializes_bool_fields_as_zero_or_one(self):
+        repository.upsert_records(self.conn, [oa_record(is_oa=False)])
+        row = self.conn.execute("SELECT is_oa FROM oa_location WHERE doi = '10.1/oa'").fetchone()
+        self.assertEqual(row["is_oa"], 0)
+
+    def test_serializes_tuple_fields_as_a_json_string(self):
+        self.conn.executescript(
+            "CREATE TABLE fake_tuple_table (key TEXT PRIMARY KEY, tags TEXT, active INTEGER)"
+        )
+        record = _FakeTupleRecord(key="a", tags=("x", "y"), active=True)
+        with mock.patch.dict(
+            repository.TABLE_FOR, {_FakeTupleRecord: ("fake_tuple_table", "overwrite")}
+        ):
+            repository.upsert_records(self.conn, [record])
+        row = self.conn.execute("SELECT tags, active FROM fake_tuple_table").fetchone()
+        self.assertEqual(json.loads(row["tags"]), ["x", "y"])
+        self.assertEqual(row["active"], 1)
+
+    def test_raises_key_error_for_an_unregistered_record_type(self):
+        with self.assertRaises(KeyError) as ctx:
+            repository.upsert_records(self.conn, [_FakeTupleRecord(key="a", tags=(), active=True)])
+        self.assertIn("OaLocationRecord", str(ctx.exception))
+
+    def test_returns_zero_for_an_empty_iterable(self):
+        self.assertEqual(repository.upsert_records(self.conn, []), 0)
+
+
+class OaPdfUrlsTest(unittest.TestCase):
+    def setUp(self):
+        handle, self.path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        os.unlink(self.path)
+        self.conn = repository.connect(self.path)
+        self.addCleanup(self._cleanup)
+
+    def _cleanup(self):
+        self.conn.close()
+        if os.path.exists(self.path):
+            os.unlink(self.path)
+
+    def test_returns_pdf_url_for_a_known_doi(self):
+        repository.upsert_records(self.conn, [oa_record(doi="10.1/a")])
+        got = repository.oa_pdf_urls(self.conn, ["10.1/a"])
+        self.assertEqual(got, {"10.1/a": "https://example.org/article.pdf"})
+
+    def test_omits_dois_with_no_pdf_url(self):
+        repository.upsert_records(self.conn, [oa_record(doi="10.1/a", pdf_url=None)])
+        got = repository.oa_pdf_urls(self.conn, ["10.1/a"])
+        self.assertEqual(got, {})
+
+    def test_omits_dois_absent_from_oa_location(self):
+        got = repository.oa_pdf_urls(self.conn, ["10.1/unknown"])
+        self.assertEqual(got, {})
+
+    def test_ignores_empty_or_none_entries_in_the_doi_list(self):
+        repository.upsert_records(self.conn, [oa_record(doi="10.1/a")])
+        got = repository.oa_pdf_urls(self.conn, ["10.1/a", None, ""])
+        self.assertEqual(got, {"10.1/a": "https://example.org/article.pdf"})
+
+    def test_returns_an_empty_dict_for_an_empty_doi_list(self):
+        self.assertEqual(repository.oa_pdf_urls(self.conn, []), {})
 
 
 if __name__ == "__main__":

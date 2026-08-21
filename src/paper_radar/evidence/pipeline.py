@@ -30,10 +30,26 @@ ENRICHERS: tuple[Enricher, ...] 라는 데이터로 뽑아낸다 — 순서·채
     캐시는 storage.cache.get/put 을 직접 쓴다 — storage.cache.fetch() 는
     loader() 의 예외를 구분하지 않고 그대로 흘려보내는 얇은 헬퍼라, "성공은
     캐시하고 어떤 실패는 캐시하지 않는다"는 이 정책을 표현할 수 없다.
+
+OA 위치 해소 단계 (T8, Unpaywall) — enrich() 와 분리한 이유
+    Unpaywall 은 ENRICHERS 에 넣지 않는다. ENRICHERS 는 papers 레코드의
+    빈 칸을 채우고 verify.build() 의 evidence/found_in_sources 에 들어가
+    confidence_score 에 영향을 준다 — 하지만 Unpaywall 은 "이 논문이
+    맞는가"를 검증하는 서지 소스가 아니라 "합법적으로 어디서 읽을 수
+    있는가"를 알려주는 부가 정보다. found_in_sources 에 넣으면 추가 소스
+    +15점이 부당하게 붙는다(이 논문이 더 신뢰할 만해지는 게 아니라 그저
+    OA 링크가 있을 뿐이다). 그래서 OA 해소는 enrich() 가 verify.build() 를
+    이미 호출해 record["verification"] 을 확정한 "이후" 별도 단계로 두고,
+    OaLocationRecord 를 repository.upsert_records() 로 oa_location 테이블에
+    저장할 뿐 papers 레코드에는 손대지 않는다 — confidence_score 는
+    unpaywall 유무와 완전히 무관해야 한다(회귀 방지 테스트로 고정).
+    캐시·오류 처리는 다른 enricher 와 동일한 매트릭스를 따른다(cache
+    source="unpaywall", key=doi).
 """
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -41,7 +57,8 @@ from urllib.parse import urlsplit
 
 from paper_radar import registry
 from paper_radar.evidence import verify
-from paper_radar.sources import crossref, europepmc, openalex, semantic_scholar
+from paper_radar.models import OaLocationRecord
+from paper_radar.sources import crossref, europepmc, openalex, semantic_scholar, unpaywall
 from paper_radar.storage import cache, repository
 from paper_radar.storage.runlog import RunLog
 from paper_radar.transport import warn
@@ -58,6 +75,11 @@ from paper_radar.transport.http import Transport
 # 캐시·error_counts 에서 예상치 못한 KeyError 를 피하려고 warn+카운트 대상으로
 # 묶는 오류 타입들. NotFound 와 BudgetExhausted 는 각각 별도 분기라 여기 없다.
 _WARN_AND_COUNT = (TransientError, RateLimited, ParseError, PermanentError)
+
+# oa_location 캐시 조회에 쓰는 source 이름. cache 테이블의 (source, key) 는
+# ENRICHERS 의 이름들과 겹치지 않아야 한다 — "unpaywall" 은 ENRICHERS 에
+# 없는 이름이라 자연히 분리된다.
+_UNPAYWALL_CACHE_SOURCE = "unpaywall"
 
 
 def _now() -> str:
@@ -190,6 +212,50 @@ def enrich(conn, transport, record, error_counts=None):
     return record
 
 
+def resolve_oa_location(conn, transport, doi, error_counts=None) -> OaLocationRecord | None:
+    """DOI 하나에 대한 Unpaywall OA 위치를 캐시 경유로 얻는다.
+
+    enrich() 의 오류×캐시 매트릭스와 동일하게 동작한다: NotFound 는 부재
+    확정으로 캐시(None), TransientError 류는 캐시하지 않고 warn+카운트,
+    BudgetExhausted 는 캐시하지 않고 exc.source="unpaywall" 을 붙여 그대로
+    전파한다(collect() 가 이 신호로 보강 루프 전체를 중단한다).
+
+    doi 가 없으면(빈 값) 호출도 캐시 조회도 하지 않고 None — DOI 없는
+    논문은 애초에 조회 대상이 아니다.
+
+    캐시에는 dataclass 를 그대로 넣을 수 없어(storage.cache 는 json.dumps
+    로 직렬화한다) dataclasses.asdict() 로 평평한 dict 를 저장하고, 캐시
+    히트 시 OaLocationRecord(**cached) 로 복원한다 — OaLocationRecord 의
+    필드가 전부 JSON 원시 타입(str/bool/None)이라 이 왕복이 손실 없이 된다.
+    """
+    if error_counts is None:
+        error_counts = {}
+    if not doi:
+        return None
+
+    cached = cache.get(conn, _UNPAYWALL_CACHE_SOURCE, doi)
+    if cached is not cache.MISS:
+        return OaLocationRecord(**cached) if cached else None
+
+    try:
+        record = unpaywall.fetch(transport, doi)
+    except NotFound:
+        cache.put(conn, _UNPAYWALL_CACHE_SOURCE, doi, None)
+        return None
+    except BudgetExhausted as exc:
+        exc.source = _UNPAYWALL_CACHE_SOURCE
+        raise
+    except _WARN_AND_COUNT as exc:
+        warn(f"unpaywall: {doi!r} 처리 중 오류 ({exc})")
+        error_counts[_UNPAYWALL_CACHE_SOURCE] = error_counts.get(_UNPAYWALL_CACHE_SOURCE, 0) + 1
+        return None
+
+    cache.put(
+        conn, _UNPAYWALL_CACHE_SOURCE, doi, dataclasses.asdict(record) if record else None
+    )
+    return record
+
+
 @dataclass(frozen=True)
 class CollectReport:
     """collect() 실행 결과 요약. CLI 가 이 값으로 exit code 를 정한다.
@@ -217,8 +283,16 @@ def collect(
         중간 BudgetExhausted 시 이미 받은 레코드까지 통째로 사라진다. OpenAlex
         는 요청당 과금이라 이미 지불한 페이지를 버리는 것은 실제 손실이다)
         -> 레코드마다 enrich -> verify(는 enrich 안에서) -> repository.upsert
+        -> (DOI 가 있으면) resolve_oa_location -> repository.upsert_records
         -> dump_json -> record_source(소스별 requests/records/errors/
         budget_remaining/stopped_reason) -> finish(status).
+
+        OA 해소는 papers 레코드가 이미 저장된 "뒤"에 별도로 실행하고,
+        그 결과(OaLocationRecord)는 papers 가 아니라 oa_location 테이블에만
+        간다 — enriched 레코드도, verification 도 건드리지 않는다
+        (evidence/pipeline.py 모듈 docstring의 "OA 위치 해소 단계" 참고).
+        그래서 이 레코드의 confidence_score/found_in_sources 는 unpaywall
+        조회 성공 여부와 완전히 무관하다.
 
     status 규칙
         모든 소스 정상 = "ok". BudgetExhausted(검색 또는 보강 단계) 나 소스
@@ -284,6 +358,7 @@ def collect(
             stopped_reason["openalex"] = "budget_exhausted"
 
         stored = []
+        oa_saved = 0
         for index, work in enumerate(works, start=1):
             if not repository.record_key(work):
                 warn(f"식별자(DOI/openalex_id)가 없어 건너뜁니다: {work.get('title')!r}")
@@ -300,11 +375,24 @@ def collect(
             if on_progress:
                 on_progress(index, len(works), public)
 
+            # OA 해소는 papers 저장이 끝난 뒤의 별도 단계다 — 이 레코드는
+            # 이미 완전히 처리·저장됐으므로, 여기서 BudgetExhausted 가 나도
+            # stored 에서 빼지 않는다(paper 자체는 성공했다는 사실이 바뀌지
+            # 않는다). 루프는 여기서 멈춰 이후 레코드는 시도하지 않는다.
+            try:
+                oa_record = resolve_oa_location(conn, transport, public.get("doi"), error_counts)
+            except BudgetExhausted as exc:
+                stopped_reason[getattr(exc, "source", "unknown")] = "budget_exhausted"
+                break
+            if oa_record is not None:
+                oa_saved += repository.upsert_records(conn, [oa_record])
+
         if json_path:
             repository.dump_json(conn, json_path)
 
         source_records: dict[str, int] = dict.fromkeys(registry.SOURCES, 0)
         source_records["openalex"] = len(works)
+        source_records["unpaywall"] = oa_saved
         for public in stored:
             for name in (public.get("verification") or {}).get("evidence") or {}:
                 source_records[name] = source_records.get(name, 0) + 1

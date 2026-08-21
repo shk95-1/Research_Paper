@@ -6,6 +6,7 @@ import tempfile
 import unittest
 
 from paper_radar.storage import repository, runlog
+from paper_radar.storage.migrations import MIGRATIONS
 
 
 class ScrubUrlTest(unittest.TestCase):
@@ -63,7 +64,9 @@ class RunLogTest(unittest.TestCase):
         self.assertEqual(row["status"], "running")
         self.assertEqual(row["command"], "evidence collect")
         self.assertIsNone(row["finished_at"])
-        self.assertEqual(row["schema_version"], 3)
+        # 하드코딩된 3 대신 MIGRATIONS 길이를 쓴다 — 새 마이그레이션이 추가될
+        # 때마다(T8 의 m0004 등) 이 테스트를 손으로 갱신하지 않아도 되게.
+        self.assertEqual(row["schema_version"], len(MIGRATIONS))
 
     def test_record_source_then_finish_round_trips(self):
         run_id = self.log.start("evidence collect", {})

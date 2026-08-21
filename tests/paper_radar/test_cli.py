@@ -14,6 +14,7 @@ from unittest import mock
 
 from paper_radar import cli
 from paper_radar.evidence.pipeline import CollectReport
+from paper_radar.models import OaLocationRecord
 from paper_radar.storage import repository
 
 
@@ -183,6 +184,73 @@ class CiteOutputTest(unittest.TestCase):
             ["evidence", "cite", "--keyword", "retinol", "--min-confidence", "90"]
         )
         self.assertIn("결과가 없습니다", text)
+
+
+def oa_location_record(**overrides):
+    base = {
+        "doi": "10.1016/j.test.2024.01.001",
+        "is_oa": True,
+        "oa_status": "hybrid",
+        "pdf_url": "https://example.org/article.pdf",
+        "landing_url": "https://example.org/landing",
+        "host_type": "publisher",
+        "license": "cc-by",
+        "checked_at": "2026-08-21T00:00:00Z",
+    }
+    base.update(overrides)
+    return OaLocationRecord(**base)
+
+
+class CitePdfLinkTest(unittest.TestCase):
+    """cite 출력의 PDF 링크 줄 — DOI 줄 다음에 있으면 추가, 없으면 기존 출력 불변."""
+
+    def setUp(self):
+        handle, self.path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        os.unlink(self.path)
+        self.addCleanup(lambda: os.path.exists(self.path) and os.unlink(self.path))
+
+    def _cite(self, argv):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            exit_code = cli.run(cli.parse_args(argv + ["--db", self.path]))
+        return exit_code, output.getvalue()
+
+    def test_prints_a_pdf_line_right_after_the_doi_line_when_a_link_is_known(self):
+        conn = repository.connect(self.path)
+        repository.upsert(conn, record(), verification())
+        repository.upsert_records(conn, [oa_location_record()])
+        conn.close()
+
+        _, text = self._cite(["evidence", "cite", "--keyword", "retinol"])
+        doi_index = text.index("https://doi.org/10.1016/j.test.2024.01.001")
+        pdf_index = text.index("PDF: https://example.org/article.pdf")
+        self.assertGreater(pdf_index, doi_index, "PDF 줄은 DOI 줄 다음에 와야 한다")
+
+    def test_prints_nothing_extra_when_no_oa_location_is_known_for_the_doi(self):
+        conn = repository.connect(self.path)
+        repository.upsert(conn, record(), verification())
+        conn.close()
+
+        _, text = self._cite(["evidence", "cite", "--keyword", "retinol"])
+        self.assertNotIn("PDF:", text)
+
+    def test_prints_nothing_extra_when_the_known_oa_location_has_no_pdf_url(self):
+        conn = repository.connect(self.path)
+        repository.upsert(conn, record(), verification())
+        repository.upsert_records(
+            conn,
+            [
+                oa_location_record(
+                    is_oa=False, oa_status="closed", pdf_url=None, landing_url=None,
+                    host_type=None, license=None,
+                )
+            ],
+        )
+        conn.close()
+
+        _, text = self._cite(["evidence", "cite", "--keyword", "retinol"])
+        self.assertNotIn("PDF:", text)
 
 
 class CollectOutputTest(unittest.TestCase):

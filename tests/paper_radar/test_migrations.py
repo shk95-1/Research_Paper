@@ -81,13 +81,39 @@ class MigrateOnAnEmptyDatabaseTest(unittest.TestCase):
             ).fetchall()
         }
         self.assertEqual(
-            tables, {"papers", "cache", "run", "run_source", "fetch_log", "sqlite_sequence"}
+            tables,
+            {
+                "papers",
+                "cache",
+                "run",
+                "run_source",
+                "fetch_log",
+                "sqlite_sequence",
+                "oa_location",
+            },
         )
 
     def test_migrate_adds_the_evidence_column(self):
         schema.migrate(self.conn)
         columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(papers)")}
         self.assertIn("evidence", columns)
+
+    def test_migrate_creates_the_oa_location_table(self):
+        schema.migrate(self.conn)
+        columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(oa_location)")}
+        self.assertEqual(
+            columns,
+            {
+                "doi",
+                "is_oa",
+                "oa_status",
+                "pdf_url",
+                "landing_url",
+                "host_type",
+                "license",
+                "checked_at",
+            },
+        )
 
 
 class AdoptsALegacyDatabaseTest(unittest.TestCase):

@@ -17,6 +17,14 @@ verification 은 두 곳에 쓴다 (papers/store.py 와 동일)
     지워버렸다. 이 모듈의 upsert() 는 "내용 필드"는 COALESCE 로 병합하고
     (새 값이 없으면 기존 값을 지키고), "검증 필드"는 매번 이번 실행의
     판정으로 무조건 갱신한다 — 자세한 이유는 upsert() 의 docstring 참고.
+
+dataclass 레코드 upsert (T8 이 T4 로부터 이연받은 기계)
+    papers 테이블 밖의 신규 소스(T8 의 Unpaywall 이 첫 사례)가 만드는
+    레코드는 dict 가 아니라 models.py 의 frozen dataclass 다. upsert_records()
+    는 이 dataclass 들을 TABLE_FOR 매핑(타입 -> (테이블명, 병합정책))에 따라
+    범용으로 저장한다 — papers 처럼 태스크마다 손으로 upsert 함수를 새로
+    쓰지 않아도 되게 하기 위함이다. 자세한 이유는 upsert_records() docstring
+    참고.
 """
 
 from __future__ import annotations
@@ -24,8 +32,20 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from collections.abc import Iterable
+from dataclasses import fields
 
+from paper_radar.models import OaLocationRecord
 from paper_radar.storage.schema import migrate
+
+# dataclass 레코드 타입 -> (테이블명, 병합정책). "overwrite" = 자연키 충돌 시
+# 전 컬럼을 excluded 값으로 무조건 갱신한다(papers.upsert() 의 COALESCE 병합과
+# 다르다) — 이런 레코드는 "최신 관측이 진실"이라, 과거 값과 섞으면 이미 사라진
+# 상태(예: 죽은 PDF 링크)가 영원히 남는다. 새 dataclass 레코드 타입을 추가하는
+# 태스크는 여기 항목 하나만 더하면 upsert_records() 가 자동으로 처리한다.
+TABLE_FOR: dict[type, tuple[str, str]] = {
+    OaLocationRecord: ("oa_location", "overwrite"),
+}
 
 # 스펙 8절 레코드 스키마 + is_retracted(버그 수정, 아래 public_record 참고).
 # public_record() 가 내보내는 키의 정의이기도 하다.
@@ -322,3 +342,91 @@ def dump_json(conn: sqlite3.Connection, path: str) -> int:
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(records, handle, ensure_ascii=False, indent=1)
     return len(records)
+
+
+def _record_row(record) -> dict:
+    """dataclass 인스턴스를 SQL 바인딩 가능한 값으로 변환한다.
+
+    tuple 필드(예: TrialRecord.conditions)는 JSON 문자열로, bool 필드는 0/1
+    로 직렬화한다 — sqlite3 는 tuple 을 바인딩할 수 없고, bool 은 바인딩은
+    되지만 0/1 로 저장해야 다른 정수 컬럼과 같은 방식으로 조회·비교된다.
+    """
+    row = {}
+    for field in fields(record):
+        value = getattr(record, field.name)
+        if isinstance(value, tuple):
+            row[field.name] = json.dumps(list(value), ensure_ascii=False)
+        elif isinstance(value, bool):
+            row[field.name] = int(value)
+        else:
+            row[field.name] = value
+    return row
+
+
+def upsert_records(conn: sqlite3.Connection, records: Iterable) -> int:
+    """models.py 의 frozen dataclass 레코드를 TABLE_FOR 매핑에 따라 upsert 한다.
+
+    각 레코드 타입의 NATURAL_KEY(ClassVar[tuple[str, ...]])로 ON CONFLICT
+    절을 만든다. 정책이 "overwrite"(지금 등록된 유일한 정책)면 자연키가
+    충돌할 때 자연키가 아닌 모든 컬럼을 excluded 값으로 무조건 덮어쓴다 —
+    papers.upsert() 의 COALESCE 병합과 달리 옛 값을 지키지 않는다(이유는
+    TABLE_FOR 주석 참고: 이런 레코드는 "최신 관측이 곧 진실"이다).
+
+    등록되지 않은 타입을 만나면 KeyError(등록된 타입 이름 목록 포함).
+    반환값은 upsert 한 레코드 수(records 를 소비한 개수, 실패 없이 전부
+    처리했다는 전제 — 실패하면 예외가 그대로 전파되고 그때까지 처리한 것도
+    commit 되지 않는다).
+    """
+    count = 0
+    for record in records:
+        record_type = type(record)
+        if record_type not in TABLE_FOR:
+            known = ", ".join(sorted(t.__name__ for t in TABLE_FOR)) or "(없음)"
+            raise KeyError(
+                f"upsert_records: 등록되지 않은 레코드 타입 {record_type.__name__!r} "
+                f"(TABLE_FOR 에 등록된 타입: {known})"
+            )
+        table, policy = TABLE_FOR[record_type]
+        if policy != "overwrite":
+            # 지금은 "overwrite" 하나뿐이다 — 새 정책이 필요해지면(예: papers 처럼
+            # 부분 병합) 여기 분기를 늘린다. 모르는 정책 문자열로 조용히 아무
+            # 갱신도 안 하는 SQL 을 만들지 않기 위해 즉시 실패한다.
+            raise ValueError(f"upsert_records: 알 수 없는 병합 정책 {policy!r} ({table})")
+
+        row = _record_row(record)
+        columns = list(row)
+        natural_key = record_type.NATURAL_KEY
+        names = ", ".join(columns)
+        placeholders = ", ".join(":" + name for name in columns)
+        conflict_columns = ", ".join(natural_key)
+        updates = ", ".join(f"{c}=excluded.{c}" for c in columns if c not in natural_key)
+
+        conn.execute(
+            f"INSERT INTO {table} ({names}) VALUES ({placeholders})"
+            f" ON CONFLICT({conflict_columns}) DO UPDATE SET {updates}",
+            row,
+        )
+        count += 1
+    conn.commit()
+    return count
+
+
+def oa_pdf_urls(conn: sqlite3.Connection, dois: Iterable[str]) -> dict[str, str]:
+    """주어진 DOI 들 중 oa_location 에 pdf_url 이 저장된 것만 {doi: pdf_url} 로.
+
+    cli.py 의 cite 출력이 검색 결과를 순회하기 전, conn 이 아직 열려 있는
+    동안 한 번에 배치 조회하기 위한 헬퍼다 — conn.close() 이후 레코드마다
+    다시 쿼리하려는 실수를 구조적으로 막는다. 대소문자·트림 정규화는 하지
+    않는다(papers.doi 도 oa_location.doi 도 이미 소문자·트림된 값만 저장하는
+    것이 두 upsert 경로의 공통 규약이다).
+    """
+    doi_list = [d for d in dois if d]
+    if not doi_list:
+        return {}
+    placeholders = ", ".join("?" for _ in doi_list)
+    rows = conn.execute(
+        f"SELECT doi, pdf_url FROM oa_location WHERE doi IN ({placeholders})"
+        " AND pdf_url IS NOT NULL",
+        doi_list,
+    ).fetchall()
+    return {row["doi"]: row["pdf_url"] for row in rows}

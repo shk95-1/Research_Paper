@@ -1,4 +1,4 @@
-"""실제 API 를 때리는 스모크 테스트 — 4개 소스의 실제 응답 형태 드리프트 감지용.
+"""실제 API 를 때리는 스모크 테스트 — 5개 소스의 실제 응답 형태 드리프트 감지용.
 
 papers/tests/live_smoke.py(T7 에서 제거된 구 버전)를 paper_radar.sources /
 paper_radar.transport 계약 기준으로 이식했다. 파일이 tool/ 아래 있고
@@ -23,7 +23,7 @@ import unittest
 
 from dotenv import load_dotenv
 
-from paper_radar.sources import crossref, europepmc, openalex, semantic_scholar
+from paper_radar.sources import crossref, europepmc, openalex, semantic_scholar, unpaywall
 from paper_radar.transport.errors import NotFound
 from paper_radar.transport.http import Transport
 
@@ -97,6 +97,24 @@ class LiveSmokeTest(unittest.TestCase):
             " care products into an existing aggregate exposure model",
         )
         self.assertIsNotNone(result, "제목 검색이 실패했습니다")
+
+    def test_unpaywall_still_returns_a_record_shaped_response(self):
+        # is_oa 가 true 든 false 든(엠바고·정책은 시간에 따라 바뀐다) 최소한
+        # 응답 형태(필드 존재)는 안정적이어야 한다 — is_oa 값 자체는 확언하지
+        # 않는다.
+        record = unpaywall.fetch(self.transport, doi=KNOWN_DOI)
+        self.assertIsNotNone(record, "Unpaywall 조회가 실패했습니다")
+        self.assertEqual(record.doi, KNOWN_DOI.lower())
+        self.assertIsInstance(record.is_oa, bool)
+        self.assertTrue(record.oa_status, "oa_status 가 비었습니다")
+        if record.is_oa:
+            self.assertIsNotNone(record.landing_url, "is_oa=true 인데 landing_url 이 없습니다")
+
+    def test_unpaywall_still_404s_on_an_unknown_doi(self):
+        # 새 계약에서는 "그 DOI 를 모른다"가 404(NotFound)로 전파된다 —
+        # is_oa: false(정상 200, 논문은 알지만 OA 가 아님)와는 다른 신호다.
+        with self.assertRaises(NotFound):
+            unpaywall.fetch(self.transport, doi="10.9999/definitely-not-a-real-doi")
 
 
 if __name__ == "__main__":
