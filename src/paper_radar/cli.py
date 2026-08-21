@@ -66,7 +66,10 @@ from paper_radar.transport import warn
 from paper_radar.transport.http import Transport
 from paper_radar.trend import aggregate as trend_aggregate
 from paper_radar.trend import collect as trend_collect
+from paper_radar.trend import collect_pubmed as trend_collect_pubmed
+from paper_radar.trend import mesh_aggregate as trend_mesh_aggregate
 from paper_radar.trend import normalize as trend_normalize
+from paper_radar.trend import overlap as trend_overlap
 from paper_radar.trend import records as trend_records
 from paper_radar.trend import suggest as trend_suggest
 from paper_radar.trend import unmatched as trend_unmatched
@@ -132,11 +135,22 @@ def parse_args(argv):
     trend_group = top.add_parser("trend", help="논문 키워드 트렌드 파이프라인 (papers_trend 이식)")
     trend_sub = trend_group.add_subparsers(dest="command", required=True)
 
-    t_collect = trend_sub.add_parser("collect", help="OpenAlex 전수 수집")
+    t_collect = trend_sub.add_parser("collect", help="OpenAlex/PubMed 전수 수집")
     t_collect.add_argument(
         "--profile", default="all", help="config.json 의 프로파일 이름, 또는 all"
     )
     t_collect.add_argument("--config", default=None, help="config.json 경로 (생략 시 내장 기본값)")
+    # provider: T15 — pubmed 를 trend 의 제2 프로바이더로 추가. 기본값
+    # openalex 로 기존 동작 불변(브리핑 지시). collect.run()(openalex, 커서
+    # 페이지네이션)과 collect_pubmed.run()(pubmed, 월별 retstart 페이지네이션)
+    # 은 페이지네이션 단위 자체가 달라 별도 모듈이다 — 여기서는 그 둘 중
+    # 어느 쪽을 부를지만 고른다(_run_trend_collect() 참고).
+    t_collect.add_argument(
+        "--provider",
+        default="openalex",
+        choices=["openalex", "pubmed"],
+        help="수집 프로바이더 (기본 openalex)",
+    )
     t_collect.add_argument(
         "--dry-run", action="store_true", help="건수와 예상 요청 수만 출력하고 수집하지 않는다"
     )
@@ -144,7 +158,15 @@ def parse_args(argv):
         "--max-pages",
         type=int,
         default=None,
-        help="이번 실행에서 받을 페이지 상한. 커서가 저장되므로 여러 번 나눠 전수를 채울 수 있다",
+        help="이번 실행에서 받을 페이지 상한 (--provider openalex). 커서가 저장되므로"
+        " 여러 번 나눠 전수를 채울 수 있다",
+    )
+    t_collect.add_argument(
+        "--max-months",
+        type=int,
+        default=None,
+        help="이번 실행에서 처리할 달 상한 (--provider pubmed). 월 커서가 저장되므로"
+        " 여러 번 나눠 전수를 채울 수 있다",
     )
     t_collect.add_argument("--db", default=DEFAULT_DB, help=argparse.SUPPRESS)
 
@@ -161,6 +183,16 @@ def parse_args(argv):
     t_aggregate = trend_sub.add_parser("aggregate", help="JSONL -> CSV 집계. DB 를 쓰지 않는다")
     t_aggregate.add_argument("--profile", required=True)
     t_aggregate.add_argument("--out", default=None, help="출력 디렉터리 (생략 시 out/trend/)")
+    # provider: T15 — pubmed 면 mesh_monthly.csv 하나(keyword/topic_monthly.csv
+    # 가 아니다), openalex 면 기존 CSV 4종. 두 provider 를 한 CSV 로 합치지
+    # 않는다(모듈 docstring "대원칙" 참고) — provider 로 산출 파일 자체가
+    # 갈린다.
+    t_aggregate.add_argument(
+        "--provider",
+        default="openalex",
+        choices=["openalex", "pubmed"],
+        help="집계 프로바이더 (기본 openalex)",
+    )
     t_aggregate.add_argument(
         "--allow-sample",
         action="store_true",
@@ -180,6 +212,15 @@ def parse_args(argv):
     t_unmatched.add_argument("--top", type=int, default=200, help="CSV 에 담을 상한. 0 이면 전부")
     t_unmatched.add_argument("--show", type=int, default=25, help="화면에 출력할 개수")
     t_unmatched.add_argument("--out", default=None)
+
+    # overlap: T15 — openalex/pubmed raw 를 DOI 로 대조하는 진단(지표가
+    # 아니다, trend/overlap.py 모듈 docstring 참고). --provider 를 받지
+    # 않는다 — 정의상 두 프로바이더를 동시에 본다.
+    t_overlap = trend_sub.add_parser(
+        "overlap", help="openalex/pubmed raw 를 DOI 로 대조하는 교차 진단 (지표 아님)"
+    )
+    t_overlap.add_argument("--profile", required=True)
+    t_overlap.add_argument("--out", default=None, help="출력 디렉터리 (생략 시 out/trend/)")
 
     # suggest: T14 — unmatched 미매칭 표현을 ingredient 테이블(PubChem+CosIng,
     # T12·T13)의 name_key/inci_name/synonym 과 정확 일치로 대조해 사전 확장
@@ -368,12 +409,17 @@ def _run_cite(args):
 
 
 def _run_trend_collect(args):
-    """`paper-radar trend collect` — papers_trend/collect_openalex.py 의 main() 이식.
+    """`paper-radar trend collect` — papers_trend/collect_openalex.py 의 main() 이식
+    + T15 의 --provider 라우팅.
 
-    프로파일별로 trend.collect.run() 을 호출한다 — 실제 수집·RunLog 기록은
-    거기서 한다. 여기서는 인자 해석과 출력만.
+    프로파일별로 trend.collect.run()(openalex) 또는 trend.collect_pubmed.run()
+    (pubmed) 을 호출한다 — 실제 수집·RunLog 기록은 거기서 한다. 여기서는
+    인자 해석과 출력만.
     """
-    config = trend_collect.load_config(args.config or trend_collect.CONFIG_PATH)
+    if args.provider == "pubmed":
+        config = trend_collect_pubmed.load_config(args.config or trend_collect_pubmed.CONFIG_PATH)
+    else:
+        config = trend_collect.load_config(args.config or trend_collect.CONFIG_PATH)
     profiles = config["profiles"]
     wanted = list(profiles) if args.profile == "all" else [args.profile]
     unknown = [name for name in wanted if name not in profiles]
@@ -381,7 +427,30 @@ def _run_trend_collect(args):
         warn(f"config 에 없는 프로파일: {', '.join(unknown)}. 사용 가능: {', '.join(profiles)}")
         return 1
 
+    if args.provider == "pubmed":
+        # pubmed_query 가 없는 프로파일은 이 provider 로 수집할 수 없다.
+        # --profile all 이면(수집 미완 프로파일이 섞여 있을 수 있다) 조용히
+        # 걸러내고, 특정 프로파일을 직접 지정했는데 없으면 명확한 오류로
+        # 알린다(config.json 의 _pubmed_query_note 참고 — cosmetics 처럼
+        # 아직 pubmed_query 를 안 넣은 프로파일이 있을 수 있다).
+        missing = [name for name in wanted if "pubmed_query" not in profiles[name]]
+        if args.profile != "all" and missing:
+            warn(
+                f"{', '.join(missing)}: config 에 pubmed_query 가 없습니다."
+                " sunscreen 프로파일처럼 pubmed_query 를 추가한 뒤 다시 시도하세요."
+            )
+            return 1
+        wanted = [name for name in wanted if name not in missing]
+        if not wanted:
+            warn("pubmed_query 가 설정된 프로파일이 없습니다")
+            return 1
+
     if args.dry_run:
+        if args.provider == "pubmed":
+            results = trend_collect_pubmed.run(wanted, config, db_path=args.db, dry_run=True)
+            for query_id, info in results.items():
+                print(f"[{query_id}] {info['count']:,}건 ({info['months']}개월 창)")
+            return 0
         results = trend_collect.run(wanted, config, db_path=args.db, dry_run=True)
         for query_id, info in results.items():
             count = info["count"]
@@ -391,7 +460,12 @@ def _run_trend_collect(args):
             print(f"[{query_id}] {count:,}건 -> 예상 요청 {info['estimated_requests']}회")
         return 0
 
-    results = trend_collect.run(wanted, config, db_path=args.db, max_pages=args.max_pages)
+    if args.provider == "pubmed":
+        results = trend_collect_pubmed.run(
+            wanted, config, db_path=args.db, max_months=args.max_months
+        )
+    else:
+        results = trend_collect.run(wanted, config, db_path=args.db, max_pages=args.max_pages)
     if any(meta is None for meta in results.values()):
         return 1
     if any((meta or {}).get("stopped_reason") for meta in results.values()):
@@ -466,12 +540,30 @@ def _run_trend_normalize(args):
 
 
 def _run_trend_aggregate(args):
-    """`paper-radar trend aggregate` — papers_trend/aggregate.py 의 main() 이식.
+    """`paper-radar trend aggregate` — papers_trend/aggregate.py 의 main() 이식
+    + T15 의 --provider 라우팅.
 
     CensusError 를 여기서 잡아 기존 SystemExit 과 같은 메시지를 stderr 로
     내고 exit code 1 로 옮긴다 — trend.aggregate.census_guard() 의 docstring
-    참조(라이브러리가 프로세스를 직접 죽이지 않는 이유).
+    참조(라이브러리가 프로세스를 직접 죽이지 않는 이유). mesh_aggregate.py
+    는 이 census_guard()/CensusError 를 그대로 재사용하므로 여기서 잡는
+    예외 타입은 provider 와 무관하게 하나(trend_aggregate.CensusError)다.
     """
+    if args.provider == "pubmed":
+        try:
+            result = trend_mesh_aggregate.run(
+                args.profile, out_dir=args.out, allow_sample=args.allow_sample
+            )
+        except trend_mesh_aggregate.CensusError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        print(f"[{args.profile}/pubmed] 레코드 {result['records']:,}건, {result['months']}개월")
+        for name, count in result["written"].items():
+            print(f"  {name:26} {count:>7,}행")
+        print(f"  provisional (색인 미완 추정): {', '.join(result['provisional']) or '없음'}")
+        print(f"  low_sample: {', '.join(result['low_sample']) or '없음'}")
+        return 0
+
     try:
         result = trend_aggregate.run(args.profile, out_dir=args.out, allow_sample=args.allow_sample)
     except trend_aggregate.CensusError as exc:
@@ -510,6 +602,33 @@ def _run_trend_unmatched(args):
         )
         if row["example_title_1"]:
             print(f"        예: {row['example_title_1'][:88]}")
+    return 0
+
+
+def _run_trend_overlap(args):
+    """`paper-radar trend overlap` — trend.overlap.run() 호출 -> 출력 (T15).
+
+    한쪽(또는 양쪽) provider 의 raw 가 없으면 trend.overlap.MissingRawError
+    를 잡아 안내만 하고 exit 0 으로 옮긴다 — 이 진단은 옵션이다(모듈
+    docstring 참고). CensusError 와 달리 exit 1 이 아니다: "아직 pubmed 를
+    수집하지 않았다"는 실패가 아니라 "아직 안 했다"는 정상 상태다.
+    """
+    try:
+        result = trend_overlap.run(args.profile, out_dir=args.out)
+    except trend_overlap.MissingRawError as exc:
+        print(str(exc))
+        return 0
+
+    rows = result["rows"]
+    total_both = sum(row["both_by_doi"] for row in rows)
+    total_oa_only = sum(row["openalex_only"] for row in rows)
+    total_pm_only = sum(row["pubmed_only"] for row in rows)
+    total_missing = sum(row["pubmed_doi_missing"] for row in rows)
+    print(f"[{args.profile}] {len(rows)}개월 대조 -> {result['target']} ({result['written']:,}행)")
+    print(
+        f"  both_by_doi 합 {total_both:,} / openalex_only 합 {total_oa_only:,} /"
+        f" pubmed_only 합 {total_pm_only:,} / pubmed_doi_missing 합 {total_missing:,}"
+    )
     return 0
 
 
@@ -666,6 +785,7 @@ TREND_COMMANDS = {
     "normalize": _run_trend_normalize,
     "aggregate": _run_trend_aggregate,
     "unmatched": _run_trend_unmatched,
+    "overlap": _run_trend_overlap,
     "suggest": _run_trend_suggest,
 }
 TRIALS_COMMANDS = {"collect": _run_trials_collect, "list": _run_trials_list}

@@ -59,6 +59,30 @@ class TrendParseArgsTest(unittest.TestCase):
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
             cli.parse_args(["trend", "suggest"])
 
+    def test_collect_defaults_the_provider_to_openalex(self):
+        # T15: --provider 기본값은 openalex — 기존 동작 불변(브리핑 지시).
+        args = cli.parse_args(["trend", "collect"])
+        self.assertEqual(args.provider, "openalex")
+
+    def test_collect_reads_provider_pubmed_and_max_months(self):
+        args = cli.parse_args(
+            ["trend", "collect", "--provider", "pubmed", "--max-months", "2"]
+        )
+        self.assertEqual(args.provider, "pubmed")
+        self.assertEqual(args.max_months, 2)
+
+    def test_collect_rejects_an_unknown_provider(self):
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            cli.parse_args(["trend", "collect", "--provider", "bogus"])
+
+    def test_aggregate_defaults_the_provider_to_openalex(self):
+        args = cli.parse_args(["trend", "aggregate", "--profile", "x"])
+        self.assertEqual(args.provider, "openalex")
+
+    def test_overlap_requires_a_profile(self):
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            cli.parse_args(["trend", "overlap"])
+
 
 class _FixtureCase(unittest.TestCase):
     def setUp(self):
@@ -298,6 +322,197 @@ class TrendCollectOutputTest(unittest.TestCase):
         ):
             exit_code = cli.run(cli.parse_args(["trend", "collect", "--profile", "demo"]))
         self.assertEqual(exit_code, 0)
+
+
+class TrendCollectPubmedProviderRoutingTest(unittest.TestCase):
+    """T15: --provider pubmed 는 trend_collect(openalex)가 아니라
+    trend_collect_pubmed 를 부른다. 네트워크는 mock 으로 대체한다."""
+
+    def test_dry_run_routes_to_collect_pubmed_and_prints_the_month_count(self):
+        config = {
+            "profiles": {"sunscreen": {"query": "q", "pubmed_query": "pq"}},
+            "window": {"from": "2024-01-01", "to": "2024-01-31"},
+        }
+        with (
+            mock.patch.object(cli.trend_collect_pubmed, "load_config", return_value=config),
+            mock.patch.object(
+                cli.trend_collect_pubmed,
+                "run",
+                return_value={"sunscreen": {"dry_run": True, "count": 42, "months": 1}},
+            ) as run_mock,
+            mock.patch.object(cli.trend_collect, "run") as openalex_run_mock,
+        ):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                exit_code = cli.run(
+                    cli.parse_args(
+                        [
+                            "trend",
+                            "collect",
+                            "--profile",
+                            "sunscreen",
+                            "--provider",
+                            "pubmed",
+                            "--dry-run",
+                        ]
+                    )
+                )
+        self.assertEqual(exit_code, 0)
+        self.assertIn("42", output.getvalue())
+        self.assertTrue(run_mock.call_args.kwargs["dry_run"])
+        # openalex 쪽 run() 은 전혀 호출되지 않았어야 한다(라우팅이 실제로 갈렸는지 확인).
+        openalex_run_mock.assert_not_called()
+
+    def test_named_profile_without_pubmed_query_exits_with_code_one(self):
+        config = {
+            "profiles": {"cosmetics": {"query": "q"}},  # pubmed_query 없음
+            "window": {"from": "2024-01-01", "to": "2024-01-31"},
+        }
+        with mock.patch.object(cli.trend_collect_pubmed, "load_config", return_value=config):
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                exit_code = cli.run(
+                    cli.parse_args(
+                        ["trend", "collect", "--profile", "cosmetics", "--provider", "pubmed"]
+                    )
+                )
+        self.assertEqual(exit_code, 1)
+        self.assertIn("pubmed_query", stderr.getvalue())
+
+    def test_profile_all_silently_skips_profiles_without_pubmed_query(self):
+        config = {
+            "profiles": {
+                "cosmetics": {"query": "q"},  # pubmed_query 없음 -> 걸러진다
+                "sunscreen": {"query": "q", "pubmed_query": "pq"},
+            },
+            "window": {"from": "2024-01-01", "to": "2024-01-31"},
+        }
+        with (
+            mock.patch.object(cli.trend_collect_pubmed, "load_config", return_value=config),
+            mock.patch.object(
+                cli.trend_collect_pubmed,
+                "run",
+                return_value={"sunscreen": {"stopped_reason": None}},
+            ) as run_mock,
+        ):
+            exit_code = cli.run(
+                cli.parse_args(["trend", "collect", "--profile", "all", "--provider", "pubmed"])
+            )
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(run_mock.call_args.args[0], ["sunscreen"])
+
+    def test_max_months_is_passed_through_to_collect_pubmed_run(self):
+        config = {
+            "profiles": {"sunscreen": {"query": "q", "pubmed_query": "pq"}},
+            "window": {"from": "2024-01-01", "to": "2024-01-31"},
+        }
+        with (
+            mock.patch.object(cli.trend_collect_pubmed, "load_config", return_value=config),
+            mock.patch.object(
+                cli.trend_collect_pubmed,
+                "run",
+                return_value={"sunscreen": {"stopped_reason": None}},
+            ) as run_mock,
+        ):
+            cli.run(
+                cli.parse_args(
+                    [
+                        "trend",
+                        "collect",
+                        "--profile",
+                        "sunscreen",
+                        "--provider",
+                        "pubmed",
+                        "--max-months",
+                        "3",
+                    ]
+                )
+            )
+        self.assertEqual(run_mock.call_args.kwargs["max_months"], 3)
+
+
+class TrendAggregatePubmedProviderRoutingTest(unittest.TestCase):
+    def test_provider_pubmed_routes_to_mesh_aggregate_and_prints_mesh_monthly(self):
+        with mock.patch.object(
+            cli.trend_mesh_aggregate,
+            "run",
+            return_value={
+                "records": 5,
+                "months": 2,
+                "written": {"mesh_monthly.csv": 3},
+                "provisional": [],
+                "low_sample": [],
+            },
+        ) as run_mock:
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                exit_code = cli.run(
+                    cli.parse_args(
+                        ["trend", "aggregate", "--profile", "sunscreen", "--provider", "pubmed"]
+                    )
+                )
+        self.assertEqual(exit_code, 0)
+        self.assertIn("mesh_monthly.csv", output.getvalue())
+        self.assertTrue(run_mock.called)
+
+    def test_provider_pubmed_census_error_becomes_exit_code_one(self):
+        with mock.patch.object(
+            cli.trend_mesh_aggregate,
+            "run",
+            side_effect=cli.trend_mesh_aggregate.CensusError("[중단] 전수가 아닙니다"),
+        ):
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                exit_code = cli.run(
+                    cli.parse_args(
+                        ["trend", "aggregate", "--profile", "sunscreen", "--provider", "pubmed"]
+                    )
+                )
+        self.assertEqual(exit_code, 1)
+        self.assertIn("[중단]", stderr.getvalue())
+
+
+class TrendOverlapOutputTest(unittest.TestCase):
+    def test_prints_the_target_and_summed_columns(self):
+        rows = [
+            {
+                "month_bucket": "2024-01",
+                "openalex_papers": 3,
+                "pubmed_papers": 3,
+                "both_by_doi": 1,
+                "openalex_only": 1,
+                "pubmed_only": 1,
+                "pubmed_doi_missing": 1,
+            }
+        ]
+        overlap_result = {
+            "target": Path("/tmp/out/sunscreen/provider_overlap.csv"),
+            "rows": rows,
+            "written": 1,
+        }
+        with mock.patch.object(cli.trend_overlap, "run", return_value=overlap_result):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                exit_code = cli.run(
+                    cli.parse_args(["trend", "overlap", "--profile", "sunscreen"])
+                )
+        self.assertEqual(exit_code, 0)
+        self.assertIn("provider_overlap.csv", output.getvalue())
+        self.assertIn("both_by_doi 합 1", output.getvalue())
+
+    def test_missing_raw_becomes_exit_code_zero_with_a_message(self):
+        with mock.patch.object(
+            cli.trend_overlap,
+            "run",
+            side_effect=cli.trend_overlap.MissingRawError("sunscreen: pubmed raw 가 없습니다."),
+        ):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                exit_code = cli.run(
+                    cli.parse_args(["trend", "overlap", "--profile", "sunscreen"])
+                )
+        self.assertEqual(exit_code, 0)
+        self.assertIn("pubmed raw 가 없습니다", output.getvalue())
 
 
 if __name__ == "__main__":

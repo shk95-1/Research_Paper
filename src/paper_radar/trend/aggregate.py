@@ -95,6 +95,25 @@ def round_or_none(value, digits=6):
     return None if value is None else round(value, digits)
 
 
+def is_low_sample(count, threshold):
+    """그 달의 분모(count)가 threshold 미만이면 비율 지표를 신뢰하지 않는다.
+
+    monthly_denominator()/term_monthly() 가 공유하던 `count < threshold` 한
+    줄을 함수로 뽑았다(T15) — mesh_aggregate.py(PubMed MeSH 축)도 같은 판정을
+    써야 하는데, 인라인 표현식은 import 할 수 없으니 함수로 노출해야
+    프로바이더마다 같은 로직을 베끼지 않는다.
+    """
+    return count < threshold
+
+
+def is_provisional_month(month, provisional):
+    """month 가 provisional_months() 가 돌려준 집합에 속하는지.
+
+    is_low_sample() 과 같은 이유로 함수로 뽑았다(T15, mesh_aggregate.py 재사용).
+    """
+    return month in provisional
+
+
 # --- 산출물 A --------------------------------------------------------------
 
 DENOMINATOR_FIELDS = [
@@ -117,8 +136,8 @@ def monthly_denominator(weighted, query_id, config, provisional):
             "month_bucket": month,
             "query_id": query_id,
             "paper_count": count,
-            "is_low_sample": count < threshold,
-            "is_provisional": month in provisional,
+            "is_low_sample": is_low_sample(count, threshold),
+            "is_provisional": is_provisional_month(month, provisional),
         }
         for month, count in sorted(counts.items())
     ]
@@ -208,8 +227,8 @@ def term_monthly(weighted, query_id, config, provisional, field):
                 "weighted_prevalence": round_or_none(
                     weight.weighted_prevalence(bucket["percentiles"])
                 ),
-                "is_low_sample": total < threshold,
-                "is_provisional": month in provisional,
+                "is_low_sample": is_low_sample(total, threshold),
+                "is_provisional": is_provisional_month(month, provisional),
             }
         )
     rows.sort(key=lambda row: (row["month_bucket"], -row["paper_count"], row["keyword_key"]))
