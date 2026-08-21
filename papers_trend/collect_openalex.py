@@ -12,6 +12,10 @@
   3. 중단/재개를 전제로 한다. 커서 상태를 파일에 남겨 재실행 시 이어간다.
   4. 중복 제거는 openalex_id 기준이다. DOI 없는 논문이 존재하므로
      DOI 를 1차 키로 쓰지 않는다.
+  5. OpenAlex 2026-02-13부터 계량제. mailto/polite pool 은 폐지돼 요청 파라미터로
+     보내지 않는다 (User-Agent 는 유지 — Crossref 등 다른 소스용 설정 표면).
+     api_key 가 있으면 무인증 1,000크레딧/일 대신 100,000크레딧/일을 쓴다.
+     402/409 또는 잔량 0 은 예산 소진으로 보고 재시도 없이 커서를 저장하고 멈춘다.
 
 OpenAlex 응답 구조 실측: 2026-08-20
   top-level 50개 필드. keywords / topics / concepts / primary_topic 모두 존재하며
@@ -48,6 +52,9 @@ MAX_SLEEP = 60.0
 BASE_BACKOFF = 2.0
 MIN_INTERVAL = 0.15
 RETRY_STATUS = {429, 500, 502, 503, 504}
+# OpenAlex 2026-02-13부터 계량제. 402/409 는 일일 예산 소진 추정이고
+# UTC 자정에나 초기화되므로 재시도해도 무의미하다 — 즉시 중단한다.
+BUDGET_STATUS = {402, 409}
 
 
 def warn(message):
@@ -85,10 +92,45 @@ def retry_delay(response, attempt):
     return min(BASE_BACKOFF * (2 ** attempt), MAX_SLEEP)
 
 
-def get_page(session, params, mailto):
-    """한 페이지. 최종 실패하면 None. 예외를 밖으로 던지지 않는다."""
-    if mailto:
-        params = dict(params, mailto=mailto)
+def parse_budget_remaining(headers):
+    """x-ratelimit-remaining 헤더를 정수로. 없거나 파싱 불가면 None. (순수 함수)"""
+    if not headers:
+        return None
+    value = headers.get("x-ratelimit-remaining")
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def determine_stopped_reason(*, budget_exhausted, hit_max_pages):
+    """중단 사유를 우선순위대로 정한다. 정상 완료(또는 그 외 실패)면 None. (순수 함수)
+
+    우선순위: 예산 소진이 --max-pages 보다 앞선다 — 둘 다 해당해도 원인은
+    예산이지, 마침 그 페이지에서 상한에 닿은 것이 아니기 때문이다.
+    """
+    if budget_exhausted:
+        return "budget_exhausted"
+    if hit_max_pages:
+        return "max_pages"
+    return None
+
+
+def get_page(session, params, api_key):
+    """한 페이지 요청과 예산 정보를 함께 돌려준다. 예외를 밖으로 던지지 않는다.
+
+    반환: (payload, budget) 튜플.
+      payload: 성공 시 파싱된 JSON, 최종 실패나 예산 소진이면 None.
+      budget: {"remaining": int | None, "exhausted": bool}.
+        exhausted 는 402/409 응답이거나 remaining 이 0 이 됐을 때 True.
+        mailto 는 더 이상 요청 파라미터로 보내지 않는다 — 2026-02-13부터
+        OpenAlex 가 mailto/polite pool 자체를 폐지해 무효한 값이 됐다.
+    """
+    if api_key:
+        params = dict(params, api_key=api_key)
+    budget = {"remaining": None, "exhausted": False}
     for attempt in range(MAX_RETRIES):
         time.sleep(MIN_INTERVAL)
         try:
@@ -97,12 +139,27 @@ def get_page(session, params, mailto):
             warn(f"요청 실패 ({exc})")
             time.sleep(retry_delay(None, attempt))
             continue
+
+        observed = parse_budget_remaining(response.headers)
+        if observed is not None:
+            budget["remaining"] = observed
+
+        if response.status_code in BUDGET_STATUS:
+            warn(f"{response.status_code} — 일일 예산 소진 추정 (UTC 자정 초기화). "
+                 "재시도하지 않습니다.")
+            budget["exhausted"] = True
+            return None, budget
+
         if response.status_code == 200:
             try:
-                return response.json()
+                payload = response.json()
             except ValueError:
                 warn("JSON 파싱 실패")
-                return None
+                return None, budget
+            if budget["remaining"] == 0:
+                budget["exhausted"] = True
+            return payload, budget
+
         if response.status_code in RETRY_STATUS:
             delay = retry_delay(response, attempt)
             warn(f"{response.status_code}, {delay:.0f}초 후 재시도 "
@@ -110,15 +167,15 @@ def get_page(session, params, mailto):
             time.sleep(delay)
             continue
         warn(f"예상치 못한 상태 {response.status_code}: {response.text[:200]}")
-        return None
+        return None, budget
     warn(f"{MAX_RETRIES}회 재시도 실패")
-    return None
+    return None, budget
 
 
-def total_count(session, query, window, mailto):
-    payload = get_page(session, {
+def total_count(session, query, window, api_key):
+    payload, _ = get_page(session, {
         "filter": build_filter(query, window), "select": "id", "per-page": 1,
-    }, mailto)
+    }, api_key)
     return ((payload or {}).get("meta") or {}).get("count")
 
 
@@ -196,7 +253,7 @@ def read_meta(query_id):
 
 
 def collect_profile(query_id, query, config, mailto, session=None, verbose=True,
-                    max_pages=None):
+                    max_pages=None, api_key=None):
     """전건을 raw/{query_id}/{YYYY-MM-DD}.jsonl 에 무손실 추가한다."""
     session = session or make_session(mailto)
     window = config["window"]
@@ -206,7 +263,7 @@ def collect_profile(query_id, query, config, mailto, session=None, verbose=True,
     state = load_state(query_id)
     previous = read_meta(query_id)
 
-    expected = total_count(session, query, window, mailto)
+    expected = total_count(session, query, window, api_key)
     if expected is None:
         # 커서가 남아 있으면 건수를 못 세도 이어갈 수 있다. 직전 실행이 기록해 둔
         # 기대값을 쓴다. 이것이 없을 때만 포기한다.
@@ -231,24 +288,33 @@ def collect_profile(query_id, query, config, mailto, session=None, verbose=True,
     cursor = state.get("cursor") or "*"
     started = time.monotonic()
     stopped_early = False
+    hit_max_pages = False
+    budget_exhausted = False
 
     with open(path, "a", encoding="utf-8") as handle:
         while cursor and len(already) < target:
             if max_pages and pages_this_run >= max_pages:
                 stopped_early = True
+                hit_max_pages = True
                 if verbose:
                     print(f"  --max-pages {max_pages} 에 도달. 커서를 저장하고 멈춥니다."
                           " 다시 실행하면 이어집니다.")
                 break
-            payload = get_page(session, {
+            payload, budget = get_page(session, {
                 "filter": build_filter(query, window),
                 "per-page": per_page,
                 "cursor": cursor,
-            }, mailto)
+            }, api_key)
             if not payload:
-                warn(f"{query_id}: 페이지 수집 실패. 커서를 저장하고 멈춥니다."
-                     " 잠시 뒤 다시 실행하면 이어집니다.")
                 stopped_early = True
+                if budget["exhausted"]:
+                    budget_exhausted = True
+                    if verbose:
+                        print("  예산 소진 추정. 커서를 저장하고 멈춥니다."
+                              " UTC 자정 이후 다시 실행하면 이어집니다.")
+                else:
+                    warn(f"{query_id}: 페이지 수집 실패. 커서를 저장하고 멈춥니다."
+                         " 잠시 뒤 다시 실행하면 이어집니다.")
                 break
             results = payload.get("results") or []
             if not results:
@@ -275,8 +341,19 @@ def collect_profile(query_id, query, config, mailto, session=None, verbose=True,
             save_state(query_id, state)
             if verbose:
                 elapsed = time.monotonic() - started
+                remaining_note = (
+                    f"  예산잔량 {budget['remaining']:,}"
+                    if budget["remaining"] is not None else ""
+                )
                 print(f"  {len(already):,}/{target:,}  "
-                      f"({state['pages']}페이지, {elapsed:.0f}초)", flush=True)
+                      f"({state['pages']}페이지, {elapsed:.0f}초){remaining_note}", flush=True)
+            if budget["exhausted"]:
+                stopped_early = True
+                budget_exhausted = True
+                if verbose:
+                    print("  예산 소진 추정 (잔량 0). 커서를 저장하고 멈춥니다."
+                          " UTC 자정 이후 다시 실행하면 이어집니다.")
+                break
 
     is_census = not limit and cursor is None and not stopped_early
     meta = {
@@ -290,6 +367,9 @@ def collect_profile(query_id, query, config, mailto, session=None, verbose=True,
         "pages": state.get("pages", 0),
         "pages_this_run": pages_this_run,
         "stopped_early": stopped_early,
+        "stopped_reason": determine_stopped_reason(
+            budget_exhausted=budget_exhausted, hit_max_pages=hit_max_pages,
+        ),
         "remaining_estimate": max(0, (expected or 0) - len(already)),
         "per_page": per_page,
         "limit": limit,
@@ -331,9 +411,10 @@ def main(argv=None):
     load_dotenv()
     config = load_config(args.config)
     mailto = os.environ.get(config.get("mailto_env", "OPENALEX_EMAIL"), "").strip()
-    if not mailto:
-        warn(f"{config.get('mailto_env')} 이 없어 polite pool 을 쓰지 않습니다. "
-             "429 가 잦아집니다.")
+    api_key = os.environ.get("OPENALEX_API_KEY", "").strip()
+    if not api_key:
+        warn("OPENALEX_API_KEY 가 없어 무인증 예산(하루 1,000크레딧)으로 동작합니다. "
+             "목록 호출은 페이지당 10크레딧이므로 하루 약 100페이지가 상한입니다.")
 
     profiles = config["profiles"]
     wanted = list(profiles) if args.profile == "all" else [args.profile]
@@ -347,14 +428,14 @@ def main(argv=None):
     for query_id in wanted:
         query = profiles[query_id]["query"]
         if args.dry_run:
-            count = total_count(session, query, config["window"], mailto)
+            count = total_count(session, query, config["window"], api_key)
             if count is None:
                 print(f"[{query_id}] 건수 확인 실패")
                 continue
             print(f"[{query_id}] {count:,}건 -> 예상 요청 {count // per_page + 1}회")
             continue
         collect_profile(query_id, query, config, mailto, session=session,
-                        max_pages=args.max_pages)
+                        max_pages=args.max_pages, api_key=api_key)
     return 0
 
 

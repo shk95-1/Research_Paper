@@ -68,11 +68,12 @@ relevance는 인용수를 크게 반영하므로 **최근 논문이 구조적으
 
 | 변수 | 용도 |
 |------|------|
-| `OPENALEX_EMAIL` | polite pool 연락처. 없으면 429가 잦아집니다 |
-| `OPENALEX_API_KEY` | OpenAlex Premium 계정 키 |
-| `SEMANTIC_SCHOLAR_API_KEY` | 있으면 rate limit이 완화됩니다 |
+| `OPENALEX_API_KEY` | 사실상 필수. 없으면 무인증 예산(하루 ~100 search)에 묶입니다 |
+| `OPENALEX_EMAIL` | Crossref polite 풀 연락처 (OpenAlex 폐지, 2026-02) |
+| `SEMANTIC_SCHOLAR_API_KEY` | 강력 권장. 익명 풀이 포화 상태입니다 |
 
-이메일은 `mailto=` 파라미터와 User-Agent로 각 API 서버에 전송됩니다.
+이메일은 User-Agent로 전송됩니다. OpenAlex는 2026-02-13부터 mailto/polite pool을
+폐지해 더 이상 이 값을 받지 않고, Crossref의 polite 풀(단건 DOI 조회)에만 유효합니다.
 
 ### 테스트
 
@@ -129,4 +130,5 @@ OpenAlex 키워드 어휘가 2025-10 에 교체되어 `trend_class` 의 `declini
 `papers_trend/raw/` 의 OpenAlex 응답 원본(JSONL 303MB)은 올리지 않았습니다.
 따라서 **CSV 를 이 저장소만으로 재생성할 수 없습니다.** 다시 만들려면
 `collect_openalex` 부터 실행해야 하고, OpenAlex 일일 예산을 씁니다
-(요청당 $0.001, UTC 자정 초기화).
+(2026-02-13부터 계량제: 목록/페이지 호출 10크레딧, search 호출 $0.001,
+무인증 1,000크레딧/일, 무료 키 등록 시 100,000크레딧/일. UTC 자정 초기화).

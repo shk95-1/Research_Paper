@@ -8,7 +8,7 @@
   "_limit_note": "null 이면 전수 수집. 숫자를 넣으면 그건 표본이므로 _meta.json 의 is_census 가 false 로 기록된다.",
   "limit": null,
   "per_page": 200,
-  "_mailto_note": "polite pool 용 연락처를 담은 환경변수 이름. 값이 아니라 이름이다. .env 에서 읽는다.",
+  "_mailto_note": "polite pool 용 연락처를 담은 환경변수 이름. 값이 아니라 이름이다. .env 에서 읽는다. 2026-02-13부터 OpenAlex 가 mailto/polite pool 자체를 폐지해 이 값은 OpenAlex 요청에는 더 이상 효과가 없다. 다른 소스가 쓸 수 있는 설정 표면이라 키는 남겨둔다.",
   "mailto_env": "OPENALEX_EMAIL",
   "_profiles_note": "query_id 는 파일 경로와 모든 집계의 자연키에 들어간다. 영문 소문자와 밑줄만 쓴다. query 는 OpenAlex title_and_abstract.search 문법이다. 공백=AND, OR=OR, 따옴표=구문 (2026-08-20 실측 확인).",
   "profiles": {
