@@ -137,8 +137,41 @@ class LiveSmokeTest(unittest.TestCase):
 
     def test_pubmed_still_reports_no_pmids_for_an_unknown_doi(self):
         # 0건은 오류가 아니라 정상적인 부재다 — esearch 가 빈 idlist 를 준다.
-        pmids = pubmed.search_pmids(self.transport, "10.9999/definitely-not-a-real-doi[DOI]")
+        pmids, count = pubmed.search_pmids(self.transport, "10.9999/definitely-not-a-real-doi[DOI]")
         self.assertEqual(pmids, [])
+        self.assertEqual(count, 0)
+
+    def test_pubmed_still_pages_a_monthly_date_ranged_esearch(self):
+        # T15: 월별 트렌드 수집이 실제로 쓰는 형태 — mindate/maxdate/datetype
+        # 로 한 달을 좁히고, retstart 로 두 번째 페이지를 받는다. count 가
+        # esearch 응답의 실제 총건수 필드와 여전히 맞는 이름/형태인지 확인한다.
+        pmids_page1, count = pubmed.search_pmids(
+            self.transport,
+            "sunscreen[tiab]",
+            retmax=5,
+            mindate="2024-01-01",
+            maxdate="2024-01-31",
+        )
+        self.assertGreater(count, 5, "이 쿼리·월이 5건 이하면 페이지네이션을 확인할 수 없습니다")
+        pmids_page2, count2 = pubmed.search_pmids(
+            self.transport,
+            "sunscreen[tiab]",
+            retmax=5,
+            retstart=5,
+            mindate="2024-01-01",
+            maxdate="2024-01-31",
+        )
+        self.assertEqual(count, count2, "같은 검색의 count 가 페이지마다 달라졌습니다")
+        self.assertTrue(set(pmids_page1).isdisjoint(pmids_page2), "두 페이지가 PMID 를 공유합니다")
+
+    def test_pubmed_still_accepts_a_batch_efetch_and_reports_mesh_terms(self):
+        # T15 의 collect_pubmed.fetch_batch() 경로 — esearch 로 PMID 여러
+        # 개를 모은 뒤, efetch id=",".join(...) 배치 하나로 본문을 받는다.
+        pmids, _count = pubmed.search_pmids(self.transport, "sunscreen[tiab]", retmax=3)
+        self.assertTrue(pmids, "sunscreen[tiab] 검색이 비었습니다")
+        articles = pubmed.fetch_batch(self.transport, pmids)
+        self.assertEqual(len(articles), len(pmids), "배치 응답 건수가 요청 PMID 수와 다릅니다")
+        self.assertTrue(any(a["mesh_terms"] for a in articles), "mesh_terms 가 전부 비었습니다")
 
     def test_unpaywall_still_returns_a_record_shaped_response(self):
         # is_oa 가 true 든 false 든(엠바고·정책은 시간에 따라 바뀐다) 최소한

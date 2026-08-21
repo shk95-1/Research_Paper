@@ -118,6 +118,59 @@ EFETCH_XML_NESTED_MARKUP = """<?xml version="1.0" ?>
 
 BROKEN_XML = "<PubmedArticleSet><PubmedArticle><MedlineCitation><PMID>1</PMID>"
 
+# T15: 배치 efetch 응답 — PubmedArticle 두 건(EFETCH_XML 과 EFETCH_XML_SECTIONED_ABSTRACT
+# 를 한 PubmedArticleSet 에 합친 것). fetch_batch()/parse_efetch_batch() 가 첫 건만
+# 읽지 않고 둘 다 순회하는지 확인한다.
+EFETCH_XML_BATCH_TWO_ARTICLES = """<?xml version="1.0" ?>
+<PubmedArticleSet>
+<PubmedArticle>
+<MedlineCitation>
+<PMID>28559157</PMID>
+<Article>
+<ArticleTitle>Integrating habits and practices data for soaps and cosmetics</ArticleTitle>
+<Abstract>
+<AbstractText>Aggregate exposure to fragrance ingredients was modelled.</AbstractText>
+</Abstract>
+<Journal><Title>Regulatory toxicology and pharmacology : RTP</Title></Journal>
+</Article>
+<MeshHeadingList>
+<MeshHeading><DescriptorName>Cosmetics</DescriptorName></MeshHeading>
+</MeshHeadingList>
+</MedlineCitation>
+</PubmedArticle>
+<PubmedArticle>
+<MedlineCitation>
+<PMID>1</PMID>
+<Article>
+<ArticleTitle>Retinol review</ArticleTitle>
+</Article>
+</MedlineCitation>
+</PubmedArticle>
+</PubmedArticleSet>"""
+
+# 빈 결과 집합 — esearch 0건 뒤에는 이런 응답이 오지 않지만(efetch 는 애초에
+# 호출되지 않는다), 방어적으로 "PubmedArticle 이 하나도 없는 XML"을 다룰 수
+# 있어야 한다.
+EFETCH_XML_EMPTY_SET = """<?xml version="1.0" ?>
+<PubmedArticleSet>
+</PubmedArticleSet>"""
+
+# PubmedArticle 은 있지만 MedlineCitation 이 없는 비정상 항목이 섞인 경우 —
+# 그 항목만 걸러지고 나머지는 파싱돼야 한다.
+EFETCH_XML_BATCH_WITH_MALFORMED_ARTICLE = """<?xml version="1.0" ?>
+<PubmedArticleSet>
+<PubmedArticle>
+<MedlineCitation>
+<PMID>28559157</PMID>
+<Article>
+<ArticleTitle>Integrating habits and practices data for soaps and cosmetics</ArticleTitle>
+</Article>
+</MedlineCitation>
+</PubmedArticle>
+<PubmedArticle>
+</PubmedArticle>
+</PubmedArticleSet>"""
+
 RECORD_KEYS = {"title", "abstract", "journal", "mesh_terms", "pmid"}
 
 
@@ -168,6 +221,65 @@ class ParseEfetchXmlTest(unittest.TestCase):
         self.assertEqual(
             result["abstract"], "Effects of Retinol on skin. We measured CO2 output."
         )
+
+
+class ParseEfetchBatchTest(unittest.TestCase):
+    """T15: parse_efetch_xml() 은 첫 PubmedArticle 만 읽지만, 이 함수는 전부 읽는다."""
+
+    def test_parses_every_article_in_a_multi_article_response(self):
+        result = pubmed.parse_efetch_batch(EFETCH_XML_BATCH_TWO_ARTICLES)
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0]["pmid"], "28559157")
+        self.assertEqual(result[0]["mesh_terms"], ("Cosmetics",))
+        self.assertEqual(result[1]["pmid"], "1")
+        self.assertEqual(result[1]["title"], "Retinol review")
+
+    def test_returns_an_empty_list_for_an_empty_article_set(self):
+        self.assertEqual(pubmed.parse_efetch_batch(EFETCH_XML_EMPTY_SET), [])
+
+    def test_skips_a_malformed_article_without_a_medline_citation(self):
+        result = pubmed.parse_efetch_batch(EFETCH_XML_BATCH_WITH_MALFORMED_ARTICLE)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["pmid"], "28559157")
+
+    def test_raises_value_error_instead_of_the_underlying_xml_parse_error(self):
+        with self.assertRaises(ValueError):
+            pubmed.parse_efetch_batch(BROKEN_XML)
+
+
+class FetchBatchTest(unittest.TestCase):
+    def _transport(self, responses):
+        clock, sleep, _ = make_clock_and_sleep()
+        session = FakeSession(responses)
+        return Transport(session=session, clock=clock, sleep=sleep), session
+
+    def test_returns_an_empty_list_without_calling_the_network_for_no_pmids(self):
+        transport, session = self._transport([])
+        self.assertEqual(pubmed.fetch_batch(transport, []), [])
+        self.assertEqual(session.calls, [])
+
+    def test_joins_pmids_with_a_comma_in_the_id_parameter(self):
+        transport, session = self._transport(
+            [FakeResponse(200, body=EFETCH_XML_BATCH_TWO_ARTICLES.encode())]
+        )
+        pubmed.fetch_batch(transport, ["28559157", "1"])
+        params = session.calls[0]["params"]
+        self.assertEqual(params["id"], "28559157,1")
+        self.assertEqual(params["db"], "pubmed")
+        self.assertEqual(params["retmode"], "xml")
+
+    def test_parses_the_batch_response_into_a_list_of_records(self):
+        transport, _ = self._transport(
+            [FakeResponse(200, body=EFETCH_XML_BATCH_TWO_ARTICLES.encode())]
+        )
+        result = pubmed.fetch_batch(transport, ["28559157", "1"])
+        self.assertEqual([article["pmid"] for article in result], ["28559157", "1"])
+
+    def test_propagates_not_found_instead_of_absorbing_it(self):
+        transport, session = self._transport([FakeResponse(404)])
+        with self.assertRaises(NotFound):
+            pubmed.fetch_batch(transport, ["28559157"])
+        self.assertEqual(len(session.calls), 1)
 
 
 class FetchTest(unittest.TestCase):
@@ -247,22 +359,50 @@ class FetchTest(unittest.TestCase):
 
 
 class SearchPmidsTest(unittest.TestCase):
+    """T15: search_pmids() 는 이제 (PMID 목록, 총건수) 튜플을 돌려준다 —
+    월별 수집이 retstart 페이지네이션과 census 판정에 count 가 필요하기
+    때문(pubmed.py 모듈 docstring 참고). 기존 "PMID 목록만" 기대하던 테스트를
+    튜플 기대로 조정했다."""
+
     def _transport(self, responses):
         clock, sleep, _ = make_clock_and_sleep()
         session = FakeSession(responses)
         return Transport(session=session, clock=clock, sleep=sleep), session
 
-    def test_returns_the_id_list(self):
+    def test_returns_the_id_list_and_count(self):
         transport, _ = self._transport(
             [FakeResponse(200, body=json.dumps(ESEARCH_FOUND).encode())]
         )
-        self.assertEqual(pubmed.search_pmids(transport, "cosmetic"), ["28559157"])
+        self.assertEqual(pubmed.search_pmids(transport, "cosmetic"), (["28559157"], 1))
 
-    def test_returns_an_empty_list_for_no_hits(self):
+    def test_returns_an_empty_list_and_zero_count_for_no_hits(self):
         transport, _ = self._transport(
             [FakeResponse(200, body=json.dumps(ESEARCH_EMPTY).encode())]
         )
-        self.assertEqual(pubmed.search_pmids(transport, "nonsense query"), [])
+        self.assertEqual(pubmed.search_pmids(transport, "nonsense query"), ([], 0))
+
+    def test_sends_retstart_and_no_date_params_by_default(self):
+        transport, session = self._transport(
+            [FakeResponse(200, body=json.dumps(ESEARCH_FOUND).encode())]
+        )
+        pubmed.search_pmids(transport, "cosmetic", retmax=100, retstart=200)
+        params = session.calls[0]["params"]
+        self.assertEqual(params["retstart"], "200")
+        self.assertNotIn("mindate", params)
+        self.assertNotIn("maxdate", params)
+        self.assertNotIn("datetype", params)
+
+    def test_sends_mindate_maxdate_and_datetype_when_given(self):
+        transport, session = self._transport(
+            [FakeResponse(200, body=json.dumps(ESEARCH_FOUND).encode())]
+        )
+        pubmed.search_pmids(
+            transport, "sunscreen", mindate="2024-01-01", maxdate="2024-01-31"
+        )
+        params = session.calls[0]["params"]
+        self.assertEqual(params["mindate"], "2024-01-01")
+        self.assertEqual(params["maxdate"], "2024-01-31")
+        self.assertEqual(params["datetype"], "pdat")
 
 
 class CurrentPolicyTest(unittest.TestCase):

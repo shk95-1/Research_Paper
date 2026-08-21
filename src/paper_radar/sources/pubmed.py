@@ -3,8 +3,25 @@
 MeSH(Medical Subject Headings)는 사람이 직접 매기는 통제 어휘다. OpenAlex 의
 토픽 체계가 2025-10 에 어휘 자체를 갈아치운 것 같은 단절이 MeSH 에는 없다 —
 그래서 트렌드 분석의 제2 축이자, evidence 레코드를 보강하는 안정적인 소스가
-된다. 이 모듈은 그 evidence 보강과, 향후 월별 트렌드 수집(T15)이 재사용할
-검색 기초(search_pmids)까지만 다룬다 — 월별 수집 자체는 T15 의 몫이다.
+된다. 이 모듈은 evidence 보강(fetch/parse_efetch_xml)과, 월별 트렌드 수집
+(T15, paper_radar.trend.collect_pubmed)이 쓰는 배치 조회(search_pmids 의
+retstart/mindate/maxdate 확장, parse_efetch_batch, fetch_batch) 둘 다 다룬다.
+
+배치 efetch — 다건을 한 번에 (T15)
+    efetch 는 `id` 파라미터에 쉼표로 여러 PMID 를 한 번에 받는다(E-utilities
+    공식 기능). 월별 수집처럼 논문 수백 편을 받아야 할 때 한 편씩 요청하면
+    페이스 제한 때문에 시간이 논문 수에 비례해 늘어난다 — fetch_batch() 로
+    한 번에 최대 EFETCH_BATCH_MAX 개까지 배치 요청한다. parse_efetch_batch()
+    는 응답 안의 모든 PubmedArticle 을 순회한다(parse_efetch_xml() 은 첫
+    번째 하나만 본다 — DOI 단건 조회는 매칭이 많아야 하나이므로 그걸로
+    충분하다).
+
+날짜 필터는 term 문자열에 끼워넣지 않는다 (T15)
+    esearch 의 `mindate`/`maxdate`/`datetype` 은 E-utilities 가 제공하는
+    공식 파라미터다. `f"({query}) AND 2024/01/01:2024/01/31[pdat]"` 처럼
+    term 문자열 안에 날짜 범위를 직접 이어붙이면 날짜 형식·연산자 우선순위를
+    스스로 다뤄야 해 파싱 오류 여지가 있다 — 공식 파라미터를 쓰면 그 여지가
+    아예 없다.
 
 두 단계 조회 — esearch 로 PMID 를 찾고, efetch 로 본문을 가져온다
     PubMed 는 Semantic Scholar/Crossref 처럼 "DOI 하나 → 레코드 하나"를 한
@@ -59,6 +76,14 @@ EFETCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 _ANON_INTERVAL_S = 0.34  # 무키 상한 3req/s → 요청 간 최소 간격
 _KEYED_INTERVAL_S = 0.1  # 무료 키(NCBI_API_KEY) 상한 10req/s
 
+# efetch id= 파라미터에 한 번에 넣을 PMID 개수 상한. E-utilities 문서가 명시한
+# 강제 한도는 아니지만, NCBI 가 실무적으로 권장하는 상한이 200이다(URL 길이·
+# 서버 부하 양쪽을 고려한 값) — 이보다 크게 배치하면 서버가 거부하거나
+# 응답이 비정상적으로 느려질 수 있다는 보고가 있다. fetch_batch() 자신은
+# 이 상한을 강제하지 않는다(순수하게 주어진 pmids 로 배치 요청 하나를 만들
+# 뿐이다) — 호출자(trend.collect_pubmed)가 이 상수로 청크를 나눠야 한다.
+EFETCH_BATCH_MAX = 200
+
 
 @register
 class PubMed:
@@ -88,20 +113,44 @@ def current_policy() -> SourcePolicy:
     return PubMed.policy
 
 
-def search_pmids(transport, term, retmax=20):
-    """esearch 로 term 을 검색해 PMID 목록을 돌려준다. 0건이면 빈 리스트(정상)."""
-    payload = transport.get_json(
-        BASE,
-        params=[
-            ("db", "pubmed"),
-            ("term", term),
-            ("retmax", str(retmax)),
-            ("retmode", "json"),
-        ],
-        policy=current_policy(),
-    )
-    idlist = ((payload or {}).get("esearchresult") or {}).get("idlist") or []
-    return [pmid for pmid in idlist if isinstance(pmid, str)]
+def search_pmids(
+    transport, term, retmax=20, retstart=0, *, mindate=None, maxdate=None, datetype="pdat"
+):
+    """esearch 로 term 을 검색해 (PMID 목록, 총건수) 를 돌려준다.
+
+    총건수(count)를 함께 돌려주는 이유(T15): 월별 트렌드 수집은 한 달의 결과가
+    retmax 를 넘을 수 있어 retstart 로 여러 페이지를 이어 받아야 하고, "이
+    달을 전수로 받았는지"(census 판정)도 count 와 실제로 받은 개수를 비교해야
+    알 수 있다 — 둘 다 이 함수 밖에서는 얻을 수 없는 값이다. 기존 호출자
+    (fetch())는 튜플의 [0](PMID 목록)만 쓰도록 조정했다.
+
+    mindate/maxdate/datetype 을 함께 주면 esearch 가 그 날짜 범위로 결과를
+    좁힌다(공식 파라미터를 쓰는 이유는 모듈 docstring 참고). 기본값 None 이면
+    날짜 필터 없이 term 전체를 검색한다(기존 단건 DOI 조회 fetch() 의 동작과
+    동일 — 날짜 파라미터를 아예 보내지 않는다).
+    """
+    params = [
+        ("db", "pubmed"),
+        ("term", term),
+        ("retmax", str(retmax)),
+        ("retstart", str(retstart)),
+        ("retmode", "json"),
+    ]
+    if mindate is not None:
+        params.append(("mindate", mindate))
+    if maxdate is not None:
+        params.append(("maxdate", maxdate))
+    if mindate is not None or maxdate is not None:
+        params.append(("datetype", datetype))
+    payload = transport.get_json(BASE, params=params, policy=current_policy())
+    esearchresult = (payload or {}).get("esearchresult") or {}
+    idlist = esearchresult.get("idlist") or []
+    pmids = [pmid for pmid in idlist if isinstance(pmid, str)]
+    try:
+        count = int(esearchresult.get("count") or 0)
+    except (TypeError, ValueError):
+        count = 0
+    return pmids, count
 
 
 def _text(element):
@@ -174,28 +223,14 @@ def _doi_from_article_ids(article_el):
     return None
 
 
-def parse_efetch_xml(xml_text):
-    """efetch(retmode=xml) 응답 본문을 파싱한다. 순수 함수(네트워크 없음).
+def _parse_article(article_el):
+    """PubmedArticle 엘리먼트 하나 -> {"pmid","title","abstract","journal",
+    "mesh_terms","doi"} 딕셔너리, 또는 MedlineCitation 이 없으면 None.
 
-    반환: {"pmid", "title", "abstract", "journal", "mesh_terms", "doi"} 또는
-    PubmedArticle 이 하나도 없으면(빈 결과 집합) None. mesh_terms 는 항상
-    tuple(없으면 빈 튜플) — fetch() 가 "빈 튜플도 항상 기록한다"는 규칙을
-    구현할 수 있으려면 "MeSH 가 없었다"와 "아직 안 물어봤다"를 구분할 값이
-    있어야 하기 때문이다(NULL 정규화는 repository 쪽에서 일어난다).
-
-    XML 자체가 깨졌으면(태그가 안 닫혔거나 인코딩이 망가진 경우) ET.ParseError
-    를 잡아 명시적 ValueError 로 다시 던진다 — 모듈 docstring 의 "파싱 실패는
-    ValueError" 설명 참고.
+    parse_efetch_xml()(첫 PubmedArticle 하나만)과 parse_efetch_batch()(모든
+    PubmedArticle 순회, T15)가 공유하는 순수 파싱 조각이다 — 두 함수가 이
+    로직을 각자 베끼면 한쪽만 고치고 잊는 회귀가 생긴다.
     """
-    try:
-        root = ET.fromstring(xml_text)
-    except ET.ParseError as exc:
-        raise ValueError(f"PubMed efetch XML 파싱 실패: {exc}") from exc
-
-    article_el = root.find("PubmedArticle")
-    if article_el is None:
-        return None
-
     citation_el = article_el.find("MedlineCitation")
     if citation_el is None:
         return None
@@ -214,6 +249,56 @@ def parse_efetch_xml(xml_text):
         "mesh_terms": _mesh_terms(citation_el),
         "doi": _doi_from_article_ids(article_el),
     }
+
+
+def parse_efetch_xml(xml_text):
+    """efetch(retmode=xml) 응답 본문을 파싱한다. 순수 함수(네트워크 없음).
+
+    반환: {"pmid", "title", "abstract", "journal", "mesh_terms", "doi"} 또는
+    PubmedArticle 이 하나도 없으면(빈 결과 집합) None. mesh_terms 는 항상
+    tuple(없으면 빈 튜플) — fetch() 가 "빈 튜플도 항상 기록한다"는 규칙을
+    구현할 수 있으려면 "MeSH 가 없었다"와 "아직 안 물어봤다"를 구분할 값이
+    있어야 하기 때문이다(NULL 정규화는 repository 쪽에서 일어난다).
+
+    XML 자체가 깨졌으면(태그가 안 닫혔거나 인코딩이 망가진 경우) ET.ParseError
+    를 잡아 명시적 ValueError 로 다시 던진다 — 모듈 docstring 의 "파싱 실패는
+    ValueError" 설명 참고.
+
+    PubmedArticleSet 안 **첫 번째** PubmedArticle 만 읽는다 — DOI 단건 조회는
+    매칭되는 PMID 가 많아야 하나이므로 그걸로 충분하다. 여러 건을 다 읽어야
+    하면 parse_efetch_batch() 를 쓴다(T15, fetch_batch() 의 배치 응답용).
+    """
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as exc:
+        raise ValueError(f"PubMed efetch XML 파싱 실패: {exc}") from exc
+
+    article_el = root.find("PubmedArticle")
+    if article_el is None:
+        return None
+    return _parse_article(article_el)
+
+
+def parse_efetch_batch(xml_text):
+    """efetch(retmode=xml) 배치 응답(PubmedArticle 여러 건)을 전부 파싱한다.
+
+    parse_efetch_xml() 과 달리 PubmedArticleSet 안의 **모든** PubmedArticle
+    을 `root.findall("PubmedArticle")` 로 순회한다(fetch_batch() 의 배치
+    호출 결과, T15). 반환은 list[dict] — 결과 집합이 비었으면(PubmedArticle
+    이 하나도 없음) 빈 리스트(None 아님 — 배치 호출은 "무언가는 있었다"가
+    전제라 단건 조회의 "그 PMID 는 없다" 의미의 None 과는 성격이 다르다).
+    MedlineCitation 이 없는 개별 article(비정상 항목)은 조용히 걸러진다 —
+    한 항목의 결손이 배치 전체를 실패시키지 않는다.
+
+    XML 자체가 깨졌으면 parse_efetch_xml() 과 동일하게 ValueError.
+    """
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as exc:
+        raise ValueError(f"PubMed efetch XML 파싱 실패: {exc}") from exc
+
+    parsed = (_parse_article(article_el) for article_el in root.findall("PubmedArticle"))
+    return [article for article in parsed if article is not None]
 
 
 def fetch(transport, doi=None, title=None):
@@ -238,7 +323,7 @@ def fetch(transport, doi=None, title=None):
     """
     if not doi:
         return None
-    pmids = search_pmids(transport, f"{doi}[DOI]", retmax=1)
+    pmids, _count = search_pmids(transport, f"{doi}[DOI]", retmax=1)
     if not pmids:
         return None
 
@@ -259,3 +344,28 @@ def fetch(transport, doi=None, title=None):
         "mesh_terms": parsed["mesh_terms"],
         "pmid": parsed["pmid"],
     }
+
+
+def fetch_batch(transport, pmids):
+    """efetch 로 여러 PMID 를 한 번에 받아 parse_efetch_batch() 로 파싱한다(T15).
+
+    `id` 파라미터에 PMID 를 쉼표로 이어붙여 한 번의 요청으로 pmids 전부를
+    요청한다 — pmids 개수에 EFETCH_BATCH_MAX 상한을 이 함수 자신은 강제하지
+    않는다(모듈 docstring 참고: 호출자가 청크를 나눈다). pmids 가 비어 있으면
+    요청 자체를 보내지 않고 빈 리스트를 돌려준다(빈 id= 로 나가는 요청은
+    NCBI 쪽에서 어떻게 응답할지 실측하지 않았고, 애초에 보낼 이유가 없다).
+
+    404/BudgetExhausted/재시도 소진 등 transport 오류는 fetch() 와 마찬가지로
+    잡지 않고 그대로 전파한다 — 이 함수는 순수 조회이고, 실패했을 때 무엇을
+    할지(건너뛴다/중단한다)는 호출자(trend.collect_pubmed)의 몫이다.
+    """
+    if not pmids:
+        return []
+    payload = transport.request(
+        Fetch(
+            url=EFETCH_URL,
+            params=(("db", "pubmed"), ("id", ",".join(pmids)), ("retmode", "xml")),
+        ),
+        current_policy(),
+    )
+    return parse_efetch_batch(payload.text())
