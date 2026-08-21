@@ -19,9 +19,11 @@
     },
     "sunscreen": {
       "query": "sunscreen OR sunblock OR photoprotection OR \"sun protection factor\" OR \"UV filter\"",
-      "note": "협의. 2026-08-20 실측 7,647건. 경고: photoprotection 이 식물·조류 광생물학 논문을 약 19% 끌어온다 (NPQ, 광합성 등). ASSUMPTIONS.md 참조."
+      "note": "협의. 2026-08-20 실측 7,647건. 경고: photoprotection 이 식물·조류 광생물학 논문을 약 19% 끌어온다 (NPQ, 광합성 등). ASSUMPTIONS.md 참조.",
+      "pubmed_query": "sunscreen[tiab] OR sunblock[tiab] OR \"sun protection factor\"[tiab] OR photoprotection[tiab] OR \"UV filter\"[tiab]"
     }
   },
+  "_pubmed_query_note": "T15: pubmed_query 는 PubMed esearch 문법(sunscreen 프로파일에만 있다 — cosmetics 는 openalex 수집도 아직 미완이라 축을 늘리지 않는다). 구성 초안이며 실측 검증 전이다 — 처음 수집할 때 count 를 openalex 실측(7,647건, 2023-09~2026-08)과 비교해 자릿수가 맞는지 확인하고 필요하면 조정할 것.",
   "_provisional_note": "수집일 기준 최근 N개월은 색인이 아직 차지 않았다고 보고 is_provisional=true 로 표시한다. 값이 1인 이유: 2026-08-20 sunscreen 전수 7,623건에서 '최근 3개월 색인 미완' 가설이 반증됐다. 2026-06(319건)과 07(338건)은 직전 6개월 평균(287)보다 오히려 높았다. 낮게 나오는 것은 진행 중인 당월뿐이고, 그것은 색인 미완이 아니라 달이 안 끝났기 때문이다. 3으로 두면 정상적인 달 2개가 prevalence_recent 에서 부당하게 빠진다. ASSUMPTIONS.md 참조. 진짜 반증은 3개월 뒤 재수집이다.",
   "provisional_months": 1,
   "_low_sample_note": "그 달 논문 수가 이 값보다 적으면 비율 지표를 신뢰하지 않는다.",
