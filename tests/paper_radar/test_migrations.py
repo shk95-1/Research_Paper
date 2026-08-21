@@ -91,6 +91,7 @@ class MigrateOnAnEmptyDatabaseTest(unittest.TestCase):
                 "sqlite_sequence",
                 "oa_location",
                 "retraction",
+                "trial",
             },
         )
 
@@ -122,6 +123,29 @@ class MigrateOnAnEmptyDatabaseTest(unittest.TestCase):
         self.assertEqual(
             columns,
             {"doi", "retraction_doi", "update_type", "update_date", "source"},
+        )
+
+    def test_migrate_creates_the_trial_table(self):
+        schema.migrate(self.conn)
+        columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(trial)")}
+        self.assertEqual(
+            columns,
+            {
+                "nct_id",
+                "title",
+                "status",
+                "phase",
+                "sponsor_class",
+                "enrollment",
+                "conditions",
+                "interventions",
+                "outcomes_json",
+                "first_posted",
+                "results_posted",
+                "url",
+                "matched_query",
+                "captured_at",
+            },
         )
 
     def test_migrate_adds_the_mesh_terms_column(self):

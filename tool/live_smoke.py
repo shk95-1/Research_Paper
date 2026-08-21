@@ -1,4 +1,5 @@
-"""실제 API 를 때리는 스모크 테스트 — 6개 소스(T10 의 pubmed 포함)의 실제 응답 형태 드리프트 감지용.
+"""실제 API 를 때리는 스모크 테스트 — 7개 소스(T10 pubmed, T11 clinicaltrials 포함)의
+실제 응답 형태 드리프트 감지용.
 
 papers/tests/live_smoke.py(T7 에서 제거된 구 버전)를 paper_radar.sources /
 paper_radar.transport 계약 기준으로 이식했다. 파일이 tool/ 아래 있고
@@ -23,7 +24,15 @@ import unittest
 
 from dotenv import load_dotenv
 
-from paper_radar.sources import crossref, europepmc, openalex, pubmed, semantic_scholar, unpaywall
+from paper_radar.sources import (
+    clinicaltrials,
+    crossref,
+    europepmc,
+    openalex,
+    pubmed,
+    semantic_scholar,
+    unpaywall,
+)
 from paper_radar.transport.errors import NotFound
 from paper_radar.transport.http import Transport
 
@@ -147,6 +156,28 @@ class LiveSmokeTest(unittest.TestCase):
         # is_oa: false(정상 200, 논문은 알지만 OA 가 아님)와는 다른 신호다.
         with self.assertRaises(NotFound):
             unpaywall.fetch(self.transport, doi="10.9999/definitely-not-a-real-doi")
+
+    def test_clinicaltrials_still_returns_the_fields_we_read(self):
+        # T11: 브리핑의 구성 예시(protocolSection.*, hasResults)가 실제 응답
+        # 형태와 여전히 맞는지 확인한다 — 실측: sunscreen 386건(2026-08).
+        records = list(clinicaltrials.iter_studies(self.transport, "sunscreen", limit=5))
+        self.assertTrue(records, "ClinicalTrials.gov 검색이 비었습니다")
+        self.assertTrue(all(r.nct_id for r in records), "nct_id 가 비어 있는 레코드가 있습니다")
+        self.assertTrue(any(r.title for r in records), "title 이 전부 비었습니다")
+        self.assertTrue(any(r.status for r in records), "status 가 전부 비었습니다")
+        self.assertTrue(
+            any(r.phase for r in records),
+            "phase 가 전부 비었습니다 — designModule 구조를 확인하세요",
+        )
+
+    def test_clinicaltrials_still_pages_past_the_first_page_size(self):
+        # niacinamide 는 실측 1,600건대 — pageSize 상한(100)을 넘겨 커서가
+        # 실제로 두 번째 페이지를 요청하는지 확인한다.
+        records = list(clinicaltrials.iter_studies(self.transport, "niacinamide", limit=150))
+        self.assertGreater(len(records), 100, "두 번째 페이지가 오지 않았습니다")
+        self.assertEqual(
+            len({r.nct_id for r in records}), len(records), "nct_id 중복 — 페이지네이션 오류 의심"
+        )
 
 
 if __name__ == "__main__":

@@ -35,7 +35,7 @@ import sqlite3
 from collections.abc import Iterable
 from dataclasses import fields
 
-from paper_radar.models import OaLocationRecord, RetractionRecord
+from paper_radar.models import OaLocationRecord, RetractionRecord, TrialRecord
 from paper_radar.storage.schema import migrate
 
 # dataclass 레코드 타입 -> (테이블명, 병합정책). "overwrite" = 자연키 충돌 시
@@ -46,6 +46,7 @@ from paper_radar.storage.schema import migrate
 TABLE_FOR: dict[type, tuple[str, str]] = {
     OaLocationRecord: ("oa_location", "overwrite"),
     RetractionRecord: ("retraction", "overwrite"),
+    TrialRecord: ("trial", "overwrite"),
 }
 
 # 스펙 8절 레코드 스키마 + is_retracted(버그 수정, 아래 public_record 참고).
@@ -426,6 +427,57 @@ def upsert_records(conn: sqlite3.Connection, records: Iterable) -> int:
         count += 1
     conn.commit()
     return count
+
+
+def _trial_from_row(row) -> TrialRecord:
+    """trial 테이블의 행 -> TrialRecord. conditions/interventions 는 JSON 왕복,
+    results_posted 는 0/1 -> bool 로 되돌린다(upsert_records()/_record_row() 의
+    반대 방향 변환)."""
+
+    def _tuple(value):
+        return tuple(json.loads(value)) if value else ()
+
+    return TrialRecord(
+        nct_id=row["nct_id"],
+        title=row["title"],
+        status=row["status"],
+        phase=row["phase"],
+        sponsor_class=row["sponsor_class"],
+        enrollment=row["enrollment"],
+        conditions=_tuple(row["conditions"]),
+        interventions=_tuple(row["interventions"]),
+        outcomes_json=row["outcomes_json"],
+        first_posted=row["first_posted"],
+        results_posted=bool(row["results_posted"]),
+        url=row["url"],
+        matched_query=row["matched_query"],
+        captured_at=row["captured_at"],
+    )
+
+
+def search_trials(
+    conn: sqlite3.Connection, keyword: str, limit: int | None = 20
+) -> list[TrialRecord]:
+    """title/conditions/interventions 에서 대소문자 무시 부분 일치. first_posted 내림차순.
+
+    conditions/interventions 는 JSON 배열 문자열로 저장돼 있어(예:
+    '["Sunburn"]') LIKE 검색이 그 원문 문자열 안에서 부분 일치를 찾는
+    형태다 — 별도 정규화 없이도 성분/조건 이름이 그대로 들어 있으면 걸린다.
+    """
+    pattern = f"%{(keyword or '').strip().lower()}%"
+    sql = (
+        "SELECT * FROM trial"
+        " WHERE (LOWER(title) LIKE :pattern"
+        "        OR LOWER(conditions) LIKE :pattern"
+        "        OR LOWER(interventions) LIKE :pattern)"
+        " ORDER BY first_posted DESC"
+    )
+    params = {"pattern": pattern}
+    if limit:
+        sql += " LIMIT :limit"
+        params["limit"] = limit
+    rows = conn.execute(sql, params).fetchall()
+    return [_trial_from_row(row) for row in rows]
 
 
 def oa_pdf_urls(conn: sqlite3.Connection, dois: Iterable[str]) -> dict[str, str]:

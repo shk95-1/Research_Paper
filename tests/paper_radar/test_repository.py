@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import ClassVar
 from unittest import mock
 
-from paper_radar.models import OaLocationRecord, RetractionRecord
+from paper_radar.models import OaLocationRecord, RetractionRecord, TrialRecord
 from paper_radar.storage import repository, runlog
 
 
@@ -652,6 +652,169 @@ class OaPdfUrlsTest(unittest.TestCase):
 
     def test_returns_an_empty_dict_for_an_empty_doi_list(self):
         self.assertEqual(repository.oa_pdf_urls(self.conn, []), {})
+
+
+def trial_record(**overrides):
+    base = {
+        "nct_id": "NCT01234567",
+        "title": "SPF50 sunscreen trial",
+        "status": "COMPLETED",
+        "phase": "PHASE3",
+        "sponsor_class": "INDUSTRY",
+        "enrollment": 120,
+        "conditions": ("Sunburn",),
+        "interventions": ("SPF50 sunscreen",),
+        "outcomes_json": '{"primaryOutcomes": [{"measure": "Erythema score"}]}',
+        "first_posted": "2023-05-01",
+        "results_posted": True,
+        "url": "https://clinicaltrials.gov/study/NCT01234567",
+        "matched_query": "sunscreen",
+        "captured_at": "2026-08-21T00:00:00Z",
+    }
+    base.update(overrides)
+    return TrialRecord(**base)
+
+
+class TrialRecordUpsertTest(unittest.TestCase):
+    """T11: TrialRecord 를 trial 테이블에 저장. TABLE_FOR 의 "overwrite" 정책
+    확인이 핵심 — 시험 상태는 최신 관측이 진실이라 옛 값을 지키지 않는다."""
+
+    def setUp(self):
+        handle, self.path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        os.unlink(self.path)
+        self.conn = repository.connect(self.path)
+        self.addCleanup(self._cleanup)
+
+    def _cleanup(self):
+        self.conn.close()
+        if os.path.exists(self.path):
+            os.unlink(self.path)
+
+    def test_inserts_a_new_trial_row(self):
+        count = repository.upsert_records(self.conn, [trial_record()])
+        self.assertEqual(count, 1)
+        row = self.conn.execute(
+            "SELECT * FROM trial WHERE nct_id = 'NCT01234567'"
+        ).fetchone()
+        self.assertEqual(row["title"], "SPF50 sunscreen trial")
+        self.assertEqual(row["status"], "COMPLETED")
+        self.assertEqual(row["phase"], "PHASE3")
+        self.assertEqual(row["sponsor_class"], "INDUSTRY")
+        self.assertEqual(row["enrollment"], 120)
+        self.assertEqual(json.loads(row["conditions"]), ["Sunburn"])
+        self.assertEqual(json.loads(row["interventions"]), ["SPF50 sunscreen"])
+        self.assertEqual(row["results_posted"], 1)
+
+    def test_conflicting_nct_id_overwrites_every_column_not_merges_it(self):
+        """"overwrite" 정책 확인의 핵심: 재관측에서 phase/enrollment 가
+        사라져도(예: 다음 조회 시 그 필드가 응답에 없어졌다) 옛 값을 지키지
+        않고 그대로 NULL 로 덮어써야 한다 — papers.upsert() 의 COALESCE
+        병합과 다르다."""
+        repository.upsert_records(self.conn, [trial_record()])
+        repository.upsert_records(
+            self.conn,
+            [
+                trial_record(
+                    status="RECRUITING",
+                    phase=None,
+                    enrollment=None,
+                    results_posted=False,
+                    captured_at="2026-08-22T00:00:00Z",
+                )
+            ],
+        )
+        count = self.conn.execute("SELECT COUNT(*) FROM trial").fetchone()[0]
+        self.assertEqual(count, 1, "같은 nct_id 는 한 행으로 유지되어야 한다")
+        row = self.conn.execute(
+            "SELECT * FROM trial WHERE nct_id = 'NCT01234567'"
+        ).fetchone()
+        self.assertEqual(row["status"], "RECRUITING")
+        self.assertIsNone(row["phase"])
+        self.assertIsNone(row["enrollment"])
+        self.assertEqual(row["results_posted"], 0)
+        self.assertEqual(row["captured_at"], "2026-08-22T00:00:00Z")
+
+    def test_serializes_results_posted_as_zero_or_one(self):
+        repository.upsert_records(self.conn, [trial_record(results_posted=False)])
+        row = self.conn.execute(
+            "SELECT results_posted FROM trial WHERE nct_id = 'NCT01234567'"
+        ).fetchone()
+        self.assertEqual(row["results_posted"], 0)
+
+
+class SearchTrialsTest(unittest.TestCase):
+    """repository.search_trials() — title/conditions/interventions LIKE 검색,
+    first_posted 내림차순."""
+
+    def setUp(self):
+        handle, self.path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        os.unlink(self.path)
+        self.conn = repository.connect(self.path)
+        self.addCleanup(self._cleanup)
+
+    def _cleanup(self):
+        self.conn.close()
+        if os.path.exists(self.path):
+            os.unlink(self.path)
+
+    def test_matches_keyword_case_insensitively_in_title(self):
+        repository.upsert_records(self.conn, [trial_record(title="Sunscreen efficacy study")])
+        found = repository.search_trials(self.conn, "SUNSCREEN")
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].nct_id, "NCT01234567")
+
+    def test_matches_keyword_in_conditions(self):
+        repository.upsert_records(
+            self.conn, [trial_record(title="Unrelated title", conditions=("Acne",))]
+        )
+        found = repository.search_trials(self.conn, "acne")
+        self.assertEqual(len(found), 1)
+
+    def test_matches_keyword_in_interventions(self):
+        repository.upsert_records(
+            self.conn,
+            [
+                trial_record(
+                    title="Unrelated title", conditions=(), interventions=("Niacinamide cream",)
+                )
+            ],
+        )
+        found = repository.search_trials(self.conn, "niacinamide")
+        self.assertEqual(len(found), 1)
+
+    def test_returns_nothing_for_an_absent_keyword(self):
+        repository.upsert_records(self.conn, [trial_record()])
+        self.assertEqual(repository.search_trials(self.conn, "niacinamide"), [])
+
+    def test_orders_by_first_posted_descending(self):
+        repository.upsert_records(
+            self.conn,
+            [
+                trial_record(nct_id="NCT1", title="Sunscreen A", first_posted="2020-01-01"),
+                trial_record(nct_id="NCT2", title="Sunscreen B", first_posted="2024-06-15"),
+            ],
+        )
+        found = repository.search_trials(self.conn, "sunscreen")
+        self.assertEqual([t.nct_id for t in found], ["NCT2", "NCT1"])
+
+    def test_honours_the_limit(self):
+        repository.upsert_records(
+            self.conn,
+            [
+                trial_record(nct_id="NCT1", title="Sunscreen A", first_posted="2020-01-01"),
+                trial_record(nct_id="NCT2", title="Sunscreen B", first_posted="2024-06-15"),
+            ],
+        )
+        found = repository.search_trials(self.conn, "sunscreen", limit=1)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].nct_id, "NCT2")
+
+    def test_round_trips_a_trial_record_faithfully(self):
+        repository.upsert_records(self.conn, [trial_record()])
+        found = repository.search_trials(self.conn, "sunscreen")
+        self.assertEqual(found[0], trial_record())
 
 
 if __name__ == "__main__":

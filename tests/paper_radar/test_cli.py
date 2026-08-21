@@ -7,6 +7,7 @@ papers/tests/test_cli.py 의 collect/trend/cite 출력 케이스를 새 명령 �
 
 import contextlib
 import io
+import json
 import os
 import tempfile
 import unittest
@@ -14,8 +15,10 @@ from unittest import mock
 
 from paper_radar import cli
 from paper_radar.evidence.pipeline import CollectReport
-from paper_radar.models import OaLocationRecord
+from paper_radar.models import OaLocationRecord, TrialRecord
 from paper_radar.storage import repository
+from paper_radar.transport.http import Transport
+from tests.paper_radar.test_transport import FakeResponse, FakeSession, make_clock_and_sleep
 
 
 def record(**overrides):
@@ -114,6 +117,36 @@ class ParseArgsTest(unittest.TestCase):
     def test_evidence_help_exits_cleanly(self):
         with self.assertRaises(SystemExit) as ctx, contextlib.redirect_stdout(io.StringIO()):
             cli.parse_args(["evidence", "--help"])
+        self.assertEqual(ctx.exception.code, 0)
+
+    def test_trials_collect_requires_a_query(self):
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            cli.parse_args(["trials", "collect"])
+
+    def test_trials_collect_reads_the_query_and_defaults_the_limit(self):
+        args = cli.parse_args(["trials", "collect", "--query", "sunscreen"])
+        self.assertEqual(args.query, "sunscreen")
+        self.assertEqual(args.limit, cli.DEFAULT_LIMIT)
+
+    def test_trials_collect_reads_an_explicit_limit(self):
+        args = cli.parse_args(["trials", "collect", "--query", "sunscreen", "--limit", "100"])
+        self.assertEqual(args.limit, 100)
+
+    def test_trials_list_requires_a_keyword(self):
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            cli.parse_args(["trials", "list"])
+
+    def test_trials_list_defaults_the_limit_to_twenty(self):
+        args = cli.parse_args(["trials", "list", "--keyword", "sunscreen"])
+        self.assertEqual(args.limit, 20)
+
+    def test_no_command_under_trials_exits_with_usage(self):
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            cli.parse_args(["trials"])
+
+    def test_trials_help_exits_cleanly(self):
+        with self.assertRaises(SystemExit) as ctx, contextlib.redirect_stdout(io.StringIO()):
+            cli.parse_args(["trials", "--help"])
         self.assertEqual(ctx.exception.code, 0)
 
 
@@ -423,6 +456,299 @@ class CollectOutputTest(unittest.TestCase):
                     )
                 )
         self.assertNotIn("OPENALEX_API_KEY", stderr.getvalue())
+
+
+STUDY = {
+    "protocolSection": {
+        "identificationModule": {"nctId": "NCT01234567", "briefTitle": "SPF50 sunscreen trial"},
+        "statusModule": {
+            "overallStatus": "COMPLETED",
+            "studyFirstPostDateStruct": {"date": "2023-05-01"},
+        },
+        "sponsorCollaboratorsModule": {"leadSponsor": {"name": "Acme Corp", "class": "INDUSTRY"}},
+        "designModule": {"phases": ["PHASE3"], "enrollmentInfo": {"count": 120}},
+        "conditionsModule": {"conditions": ["Sunburn"]},
+        "armsInterventionsModule": {"interventions": [{"type": "DRUG", "name": "SPF50 sunscreen"}]},
+        "outcomesModule": {"primaryOutcomes": [{"measure": "Erythema score"}]},
+    },
+    "hasResults": True,
+}
+
+
+def _json_response(payload, status=200):
+    return FakeResponse(status, body=json.dumps(payload).encode())
+
+
+class TrialsCollectPipelineTest(unittest.TestCase):
+    """cli._collect_trials() — FakeSession 을 통해 실제 request 루프를 통과시켜
+    저장·RunLog 자기기록(run/run_source)·부분 결과 보존을 검증한다."""
+
+    def setUp(self):
+        handle, self.path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        os.unlink(self.path)
+        self.conn = repository.connect(self.path)
+        self.addCleanup(self._cleanup)
+
+    def _cleanup(self):
+        self.conn.close()
+        if os.path.exists(self.path):
+            os.unlink(self.path)
+
+    def _transport(self, responses):
+        clock, sleep, _ = make_clock_and_sleep()
+        session = FakeSession(responses)
+        return Transport(session=session, clock=clock, sleep=sleep), session
+
+    def test_a_full_run_stores_and_records_run_metadata(self):
+        transport, session = self._transport(
+            [_json_response({"totalCount": 1, "studies": [STUDY]})]
+        )
+        report = cli._collect_trials(self.conn, transport, "sunscreen", 10)
+
+        self.assertEqual(report.status, "ok")
+        self.assertEqual(len(report.records), 1)
+        self.assertIsNone(report.stopped_reason)
+        self.assertEqual(len(session.calls), 1)
+
+        stored_count = self.conn.execute("SELECT COUNT(*) FROM trial").fetchone()[0]
+        self.assertEqual(stored_count, 1)
+
+        run_row = self.conn.execute(
+            "SELECT * FROM run WHERE run_id = ?", (report.run_id,)
+        ).fetchone()
+        self.assertEqual(run_row["status"], "ok")
+        self.assertIsNotNone(run_row["finished_at"])
+        self.assertEqual(run_row["command"], "trials collect")
+
+        source_row = self.conn.execute(
+            "SELECT * FROM run_source WHERE run_id = ? AND source = 'clinicaltrials'",
+            (report.run_id,),
+        ).fetchone()
+        self.assertEqual(source_row["requests"], 1)
+        self.assertEqual(source_row["records"], 1)
+        self.assertIsNone(source_row["stopped_reason"])
+
+    def test_budget_exhausted_stops_but_keeps_already_collected_records_and_marks_partial(self):
+        responses = [
+            _json_response(
+                {"totalCount": 3, "studies": [STUDY, STUDY], "nextPageToken": "p2"}
+            ),
+            FakeResponse(402),  # BudgetExhausted
+        ]
+        transport, _ = self._transport(responses)
+        report = cli._collect_trials(self.conn, transport, "sunscreen", 10)
+
+        self.assertEqual(report.status, "partial")
+        self.assertEqual(report.stopped_reason, "budget_exhausted")
+        self.assertEqual(len(report.records), 2, "1페이지에서 이미 받은 레코드는 보존돼야 한다")
+
+        stored_count = self.conn.execute("SELECT COUNT(*) FROM trial").fetchone()[0]
+        self.assertEqual(stored_count, 1, "STUDY 가 같은 nct_id 라 한 행으로 합쳐진다")
+
+        source_row = self.conn.execute(
+            "SELECT * FROM run_source WHERE run_id = ? AND source = 'clinicaltrials'",
+            (report.run_id,),
+        ).fetchone()
+        self.assertEqual(source_row["stopped_reason"], "budget_exhausted")
+
+    def test_returns_no_records_when_the_search_finds_nothing(self):
+        transport, _ = self._transport([_json_response({"totalCount": 0, "studies": []})])
+        report = cli._collect_trials(self.conn, transport, "sunscreen", 10)
+        self.assertEqual(report.records, [])
+        self.assertEqual(report.status, "ok")
+
+    def test_calls_on_progress_once_per_collected_record_with_the_running_total(self):
+        transport, _ = self._transport(
+            [_json_response({"totalCount": 1, "studies": [STUDY]})]
+        )
+        calls = []
+        cli._collect_trials(
+            self.conn,
+            transport,
+            "sunscreen",
+            10,
+            on_progress=lambda index, total, trial: calls.append((index, total, trial.nct_id)),
+        )
+        self.assertEqual(calls, [(1, 1, "NCT01234567")])
+
+    def test_reusing_the_same_transport_after_collect_does_not_leak_into_the_finished_run(self):
+        transport, _ = self._transport(
+            [
+                _json_response({"totalCount": 1, "studies": [STUDY]}),
+                FakeResponse(200),  # collect 종료 후 같은 transport 로 보내는 요청
+            ]
+        )
+        report = cli._collect_trials(self.conn, transport, "sunscreen", 10)
+        fetch_count_after_collect = self.conn.execute(
+            "SELECT COUNT(*) FROM fetch_log WHERE run_id = ?", (report.run_id,)
+        ).fetchone()[0]
+        self.assertGreater(fetch_count_after_collect, 0)
+
+        from paper_radar.contract import Fetch, SourcePolicy
+
+        transport.request(
+            Fetch(url="https://api.example.org/x"),
+            SourcePolicy(host="api.example.org", min_interval_s=0.0),
+        )
+        fetch_count_after_reuse = self.conn.execute(
+            "SELECT COUNT(*) FROM fetch_log WHERE run_id = ?", (report.run_id,)
+        ).fetchone()[0]
+        self.assertEqual(fetch_count_after_reuse, fetch_count_after_collect)
+
+
+def trials_report(records=None, stopped_reason=None, status="ok"):
+    return cli.TrialsReport(
+        run_id="test-run", records=records or [], stopped_reason=stopped_reason, status=status
+    )
+
+
+def trial_record(**overrides):
+    base = {
+        "nct_id": "NCT01234567",
+        "title": "SPF50 sunscreen trial",
+        "status": "COMPLETED",
+        "phase": "PHASE3",
+        "sponsor_class": "INDUSTRY",
+        "enrollment": 120,
+        "conditions": ("Sunburn",),
+        "interventions": ("SPF50 sunscreen",),
+        "outcomes_json": "{}",
+        "first_posted": "2023-05-01",
+        "results_posted": True,
+        "url": "https://clinicaltrials.gov/study/NCT01234567",
+        "matched_query": "sunscreen",
+        "captured_at": "2026-08-21T00:00:00Z",
+    }
+    base.update(overrides)
+    return TrialRecord(**base)
+
+
+class TrialsCollectCliTest(unittest.TestCase):
+    """`trials collect` 의 인자 전달·출력·exit code — _collect_trials() 를
+    mock.patch 로 대체해 CollectOutputTest 와 같은 결로 검증한다."""
+
+    def setUp(self):
+        handle, self.path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        os.unlink(self.path)
+        self.addCleanup(lambda: os.path.exists(self.path) and os.unlink(self.path))
+
+    def _collect(self, argv, collect_return):
+        output = io.StringIO()
+        with (
+            mock.patch.object(cli, "_collect_trials", return_value=collect_return) as collect,
+            contextlib.redirect_stdout(output),
+        ):
+            exit_code = cli.run(cli.parse_args(argv + ["--db", self.path]))
+        return exit_code, output.getvalue(), collect
+
+    def test_passes_the_parsed_query_and_limit_through(self):
+        _, _, collect = self._collect(
+            ["trials", "collect", "--query", "sunscreen", "--limit", "50"],
+            trials_report(),
+        )
+        _, _, query, limit = collect.call_args.args
+        self.assertEqual((query, limit), ("sunscreen", 50))
+
+    def test_reports_how_many_trials_were_stored(self):
+        exit_code, text, _ = self._collect(
+            ["trials", "collect", "--query", "sunscreen"],
+            trials_report(records=[trial_record(), trial_record(nct_id="NCT2")]),
+        )
+        self.assertEqual(exit_code, 0)
+        self.assertIn("2", text)
+
+    def test_returns_zero_for_a_fully_ok_report(self):
+        exit_code, _, _ = self._collect(
+            ["trials", "collect", "--query", "sunscreen"], trials_report(status="ok")
+        )
+        self.assertEqual(exit_code, 0)
+
+    def test_returns_one_when_the_report_is_partial(self):
+        exit_code, _, _ = self._collect(
+            ["trials", "collect", "--query", "sunscreen"],
+            trials_report(stopped_reason="budget_exhausted", status="partial"),
+        )
+        self.assertEqual(exit_code, 1)
+
+    def test_exit_code_follows_report_status_rather_than_recomputing_it(self):
+        """partial/ok 판정은 _collect_trials() 한 곳에서만 계산한다 — CLI 는
+        report.status 를 그대로 옮길 뿐, stopped_reason 을 다시 훑어
+        재계산하지 않는다. stopped_reason 이 없어도 status="partial" 이면
+        여전히 exit 1 이어야 한다."""
+        exit_code, _, _ = self._collect(
+            ["trials", "collect", "--query", "sunscreen"],
+            trials_report(status="partial"),  # stopped_reason=None
+        )
+        self.assertEqual(exit_code, 1)
+
+    def test_prints_a_progress_line_with_nct_id_phase_sponsor_class_and_title(self):
+        def fake_collect(conn, transport, query, limit, *, on_progress=None):
+            if on_progress:
+                on_progress(1, 1, trial_record())
+            return trials_report(records=[trial_record()])
+
+        output = io.StringIO()
+        with (
+            mock.patch.object(cli, "_collect_trials", side_effect=fake_collect),
+            contextlib.redirect_stdout(output),
+        ):
+            cli.run(
+                cli.parse_args(
+                    ["trials", "collect", "--query", "sunscreen", "--db", self.path]
+                )
+            )
+        text = output.getvalue()
+        self.assertIn("NCT01234567", text)
+        self.assertIn("PHASE3", text)
+        self.assertIn("INDUSTRY", text)
+        self.assertIn("SPF50 sunscreen trial", text)
+
+
+class TrialsListCliTest(unittest.TestCase):
+    """`trials list` — 로컬 DB 만 읽는다(네트워크 없음)."""
+
+    def setUp(self):
+        handle, self.path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        os.unlink(self.path)
+        self.addCleanup(lambda: os.path.exists(self.path) and os.unlink(self.path))
+
+    def _list(self, argv):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            exit_code = cli.run(cli.parse_args(argv + ["--db", self.path]))
+        return exit_code, output.getvalue()
+
+    def test_prints_the_matching_trial_with_its_key_fields(self):
+        conn = repository.connect(self.path)
+        repository.upsert_records(conn, [trial_record()])
+        conn.close()
+
+        exit_code, text = self._list(["trials", "list", "--keyword", "sunscreen"])
+        self.assertEqual(exit_code, 0)
+        self.assertIn("NCT01234567", text)
+        self.assertIn("SPF50 sunscreen trial", text)
+        self.assertIn("COMPLETED", text)
+        self.assertIn("PHASE3", text)
+        self.assertIn("INDUSTRY", text)
+        self.assertIn("120", text)
+        self.assertIn("결과 게시됨", text)
+        self.assertIn("https://clinicaltrials.gov/study/NCT01234567", text)
+
+    def test_omits_the_results_posted_line_when_no_results_are_posted(self):
+        conn = repository.connect(self.path)
+        repository.upsert_records(conn, [trial_record(results_posted=False)])
+        conn.close()
+
+        _, text = self._list(["trials", "list", "--keyword", "sunscreen"])
+        self.assertNotIn("결과 게시됨", text)
+
+    def test_reports_when_the_keyword_matches_nothing(self):
+        exit_code, text = self._list(["trials", "list", "--keyword", "niacinamide"])
+        self.assertEqual(exit_code, 0)
+        self.assertIn("결과가 없습니다", text)
 
 
 if __name__ == "__main__":

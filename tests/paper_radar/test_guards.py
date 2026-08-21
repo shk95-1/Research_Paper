@@ -17,9 +17,11 @@ from urllib.parse import urlsplit
 
 from paper_radar import registry
 
-# 등록 부작용 트리거 — registry.SOURCES 를 검사하려면 6개 소스 모듈(T10 의
-# pubmed 포함)이 먼저 import 되어 @register 데코레이터가 실행돼야 한다.
+# 등록 부작용 트리거 — registry.SOURCES 를 검사하려면 7개 소스 모듈(T10 의
+# pubmed, T11 의 clinicaltrials 포함)이 먼저 import 되어 @register 데코레이터가
+# 실행돼야 한다.
 from paper_radar.sources import (  # noqa: F401
+    clinicaltrials,
     crossref,
     europepmc,
     openalex,
@@ -233,10 +235,19 @@ class SourceDeclarationConsistencyTest(unittest.TestCase):
     def test_the_currently_known_sources_are_all_registered(self):
         """레지스트리 순회 검사가 실제로 뭔가를 보고 있는지 확인한다 — 등록
         자체가 (import 순서 문제 등으로) 빠지면 위 검사가 0건을 통과시키며
-        조용히 무력화된다. T10 이 pubmed 를 추가해 다섯에서 여섯이 됐다."""
+        조용히 무력화된다. T10 이 pubmed 를 추가해 다섯에서 여섯, T11 이
+        clinicaltrials 를 추가해 여섯에서 일곱이 됐다."""
         self.assertEqual(
             set(registry.SOURCES),
-            {"openalex", "crossref", "semantic_scholar", "europepmc", "unpaywall", "pubmed"},
+            {
+                "openalex",
+                "crossref",
+                "semantic_scholar",
+                "europepmc",
+                "unpaywall",
+                "pubmed",
+                "clinicaltrials",
+            },
         )
 
 
