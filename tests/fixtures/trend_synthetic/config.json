@@ -1,0 +1,18 @@
+{
+  "_comment": "trend 골든 고정용 합성 설정. 실제 sunscreen/cosmetics 프로파일과 무관하다. make_trend_golden.py(구 코드)와 test_trend_golden.py(신 코드) 양쪽이 이 파일 하나를 공유해 드리프트를 막는다.",
+  "window": {
+    "from": "2023-09-01",
+    "to": "2026-08-31"
+  },
+  "limit": null,
+  "per_page": 200,
+  "mailto_env": "OPENALEX_EMAIL",
+  "profiles": {
+    "synthetic": {
+      "query": "synthetic sunscreen fixture query",
+      "note": "합성 픽스처 전용. 38건, tests/fixtures/trend_synthetic/raw/openalex/synthetic/ 참조."
+    }
+  },
+  "provisional_months": 1,
+  "low_sample_threshold": 5
+}

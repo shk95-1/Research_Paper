@@ -1,0 +1,24 @@
+{
+ "query_id": "synthetic",
+ "provider": "openalex",
+ "query": "synthetic sunscreen fixture query",
+ "window": {
+  "from": "2023-09-01",
+  "to": "2026-08-31"
+ },
+ "expected_from_api": 38,
+ "collected": 38,
+ "new_this_run": 38,
+ "duplicates_skipped": 0,
+ "pages": 1,
+ "pages_this_run": 1,
+ "stopped_early": false,
+ "stopped_reason": null,
+ "remaining_estimate": 0,
+ "per_page": 200,
+ "limit": null,
+ "is_census": true,
+ "census_note": "전수. 정렬 순서는 결과에 영향을 주지 않는다.",
+ "collected_at": "2026-08-20T12:00:00Z",
+ "openalex_fields_verified_on": "2026-08-20"
+}

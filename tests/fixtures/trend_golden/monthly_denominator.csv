@@ -1,0 +1,8 @@
+﻿month_bucket,query_id,paper_count,is_low_sample,is_provisional
+2023-09,synthetic,6,False,False
+2023-11,synthetic,2,True,False
+2024-02,synthetic,6,False,False
+2024-07,synthetic,8,False,False
+2025-03,synthetic,6,False,False
+2025-09,synthetic,6,False,False
+2026-08,synthetic,3,True,True

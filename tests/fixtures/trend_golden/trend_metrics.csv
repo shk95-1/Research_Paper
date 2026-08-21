@@ -1,0 +1,31 @@
+﻿keyword_key,canonical_en,category,is_in_lexicon,query_id,first_seen_month,total_papers,months_present,months_observed,prevalence_recent,prevalence_prior,growth_ratio,is_new_entrant,weighted_prevalence_recent,trend_class
+NIACINAMIDE,niacinamide,ingredient,True,synthetic,2023-09,8,5,7,0.333333,0.15,2.2222,False,0.833333,unrated
+ZINC_OXIDE,zinc oxide,uv_filter,True,synthetic,2023-09,5,5,7,0.166667,0.091667,1.8182,False,0.583333,unrated
+SKIN_BARRIER,skin barrier,mechanism,True,synthetic,2024-02,3,2,7,0.166667,0.066667,2.5,False,0.916667,unrated
+cactus extract complex,cactus extract complex,,False,synthetic,2023-09,3,3,7,0.0,0.058333,0.0,False,,unrated
+ANTIOXIDANT,antioxidant,mechanism,True,synthetic,2024-02,2,2,7,0.0,0.066667,0.0,False,,unrated
+ANTI_AGING,anti-aging,claim,True,synthetic,2023-09,2,2,7,0.0,0.058333,0.0,False,,unrated
+CERAMIDE,ceramide,ingredient,True,synthetic,2024-02,2,2,7,0.166667,0.033333,5.0,False,0.083333,unrated
+MELANIN,melanin,mechanism,True,synthetic,2024-02,2,1,7,0.0,0.066667,0.0,False,,unrated
+NANOPARTICLE,nanoparticle,formulation,True,synthetic,2024-02,2,2,7,0.0,0.066667,0.0,False,,unrated
+OXYBENZONE,oxybenzone,uv_filter,True,synthetic,2023-11,2,2,7,0.0,0.125,0.0,False,,unrated
+PEPTIDE,peptide,ingredient,True,synthetic,2024-07,2,2,7,0.166667,0.025,6.6667,False,0.083333,unrated
+SPF,sun protection factor,spec,True,synthetic,2023-09,2,2,7,0.0,0.033333,0.0,False,,unrated
+TITANIUM_DIOXIDE,titanium dioxide,uv_filter,True,synthetic,2023-09,2,2,7,0.0,0.058333,0.0,False,,unrated
+CENTELLA,Centella asiatica,ingredient,True,synthetic,2024-07,1,1,7,0.0,0.025,0.0,False,,unrated
+CORAL_TOXICITY,coral reef toxicity,regulatory,True,synthetic,2023-11,1,1,7,0.0,0.1,0.0,False,,unrated
+EGF,epidermal growth factor,peptide,True,synthetic,2024-07,1,1,7,0.0,0.025,0.0,False,,unrated
+ENDOCRINE_DISRUPTION,endocrine disruption,regulatory,True,synthetic,2024-07,1,1,7,0.0,0.025,0.0,False,,unrated
+HYALURONIC_ACID,hyaluronic acid,ingredient,True,synthetic,2024-02,1,1,7,0.0,0.033333,0.0,False,,unrated
+LIPOSOME,liposome,formulation,True,synthetic,2024-02,1,1,7,0.0,0.033333,0.0,False,,unrated
+MICROBIOME,skin microbiome,mechanism,True,synthetic,2025-03,1,1,7,0.0,0.033333,0.0,False,,unrated
+NICOTINAMIDE,nicotinamide,ingredient,True,synthetic,2023-09,1,1,7,0.0,0.033333,0.0,False,,unrated
+PDRN,polydeoxyribonucleotide,peptide,True,synthetic,2025-03,1,1,7,0.0,0.033333,0.0,False,,unrated
+PHOTOPROTECTION,photoprotection,mechanism,True,synthetic,2025-09,1,1,7,0.166667,0.0,,False,0.333333,unrated
+STRATUM_CORNEUM,stratum corneum,anatomy,True,synthetic,2024-07,1,1,7,0.0,0.025,0.0,False,,unrated
+SUPEROXIDE_DISMUTASE,superoxide dismutase,enzyme,True,synthetic,2025-03,1,1,7,0.0,0.033333,0.0,False,,unrated
+TYROSINASE,tyrosinase,enzyme,True,synthetic,2024-02,1,1,7,0.0,0.033333,0.0,False,,unrated
+ULTRAVIOLET,ultraviolet radiation,spec,True,synthetic,2025-09,1,1,7,0.166667,0.0,,False,0.333333,unrated
+UVA_PROTECTION,UVA protection,spec,True,synthetic,2023-11,1,1,7,0.0,0.1,0.0,False,,unrated
+UVB,UVB radiation,spec,True,synthetic,2023-11,1,1,7,0.0,0.1,0.0,False,,unrated
+novel peptide blend xyz,novel peptide blend xyz,,False,synthetic,2026-08,1,1,7,0.0,0.0,,False,,unrated
