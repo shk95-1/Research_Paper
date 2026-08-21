@@ -121,6 +121,35 @@ class RetryTest(unittest.TestCase):
         self.assertEqual(len(session.calls), 2)
         self.assertEqual(sleeps, [1.5])
 
+    def test_backoff_alone_covers_pacing_when_it_exceeds_min_interval(self):
+        """min_interval_s(1.0초) 보다 백오프(1.5초)가 더 크면, 재시도 직전에 이미
+        min_interval_s 이상 지난 셈이라 _throttle 이 추가로 sleep 을 넣으면 안 된다
+        — 스로틀과 백오프가 겹쳐 이중으로 기다리면 안 된다."""
+        clock, sleep, sleeps = make_clock_and_sleep()
+        session = FakeSession([FakeResponse(429), FakeResponse(200)])
+        transport = Transport(session=session, clock=clock, sleep=sleep)
+        policy = SourcePolicy(host="api.example.org", min_interval_s=1.0)
+
+        transport.request(Fetch(url="https://api.example.org/x"), policy)
+
+        # 백오프(1.5초) 하나만 sleep 되고, 두 번째 시도 전 _throttle 이 추가로
+        # sleep 을 넣지 않는다 — 1.5초 >= min_interval_s(1.0초) 이기 때문이다.
+        self.assertEqual(sleeps, [1.5])
+
+    def test_throttle_tops_up_the_remaining_wait_when_min_interval_exceeds_backoff(self):
+        """min_interval_s(5.0초) 가 백오프(1.5초)보다 크면, 백오프로 기다린 1.5초는
+        이미 흐른 시간으로 인정하고 _throttle 이 남은 3.5초만 추가로 sleep 해야 한다
+        — 5.0초를 통째로 다시 기다리면 이중 대기(버그)다."""
+        clock, sleep, sleeps = make_clock_and_sleep()
+        session = FakeSession([FakeResponse(429), FakeResponse(200)])
+        transport = Transport(session=session, clock=clock, sleep=sleep)
+        policy = SourcePolicy(host="api.example.org", min_interval_s=5.0)
+
+        transport.request(Fetch(url="https://api.example.org/x"), policy)
+
+        self.assertEqual(sleeps, [1.5, 3.5])
+        self.assertAlmostEqual(sum(sleeps), 5.0)
+
     def test_numeric_retry_after_header_overrides_backoff(self):
         """Retry-After 가 숫자형이면 지수 백오프(1.5초)보다 그 값(5초)을 써야 한다."""
         clock, sleep, sleeps = make_clock_and_sleep()
@@ -224,6 +253,16 @@ class ErrorTypeTest(unittest.TestCase):
         """404/402/409 를 제외한 4xx 는 요청 자체가 잘못됐다는 뜻 — 재시도하지 않는다."""
         transport, session = self._transport([FakeResponse(418)])
         with self.assertRaises(PermanentError):
+            transport.request(Fetch(url="https://api.example.org/x"), DEFAULT_POLICY)
+        self.assertEqual(len(session.calls), 1)
+
+    def test_5xx_outside_retry_status_raises_transient_error_without_retrying(self):
+        """501 은 RETRY_STATUS 밖이라 재시도하지는 않지만, 서버측 오류라는 사실은
+        같으므로 PermanentError(영구 포기) 가 아니라 TransientError(다음 실행에서
+        재시도 가능)로 던져야 한다. 이걸 PermanentError 로 잘못 분류하면 호출자가
+        일시적 서버 장애를 영구 실패로 취급해 재시도 기회를 영영 잃는다."""
+        transport, session = self._transport([FakeResponse(501)])
+        with self.assertRaises(TransientError):
             transport.request(Fetch(url="https://api.example.org/x"), DEFAULT_POLICY)
         self.assertEqual(len(session.calls), 1)
 

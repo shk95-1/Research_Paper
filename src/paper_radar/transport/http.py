@@ -223,7 +223,17 @@ class Transport:
                 self._sleep(delay)
                 continue
 
-            # 404/BUDGET_STATUS/RETRY_STATUS 가 아닌 그 외 전부(다른 4xx 포함).
+            if status >= 500:
+                # RETRY_STATUS 에 없는 5xx (501/505/511 등). 재시도 목록에 없다고 해서
+                # "요청 자체가 잘못됐다"(PermanentError)로 보내면 일시적 서버 장애를
+                # 영구 실패로 오분류해 호출자가 향후 재시도 기회 자체를 잃는다 — 서버측
+                # 오류라는 사실은 RETRY_STATUS 여부와 무관하다. 재시도는 하지 않되(이
+                # 코드가 알려진 재시도 대상이 아니므로) 타입은 TransientError 로 던진다.
+                raise TransientError(
+                    f"{host}: {status} (재시도 대상 외 5xx, 즉시 포기)", status=status
+                )
+
+            # 404/BUDGET_STATUS/RETRY_STATUS/5xx 가 아닌 그 외(다른 4xx, 예상 밖 3xx 등).
             # 요청 자체가 잘못됐다는 뜻이므로 재시도하지 않는다.
             raise PermanentError(f"{host}: 예상치 못한 상태 {status}", status=status)
 
