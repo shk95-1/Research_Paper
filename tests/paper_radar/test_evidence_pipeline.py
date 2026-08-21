@@ -54,6 +54,7 @@ WORK = {
 }
 
 WORK2 = dict(WORK, id="https://openalex.org/W2", doi="https://doi.org/10.1/b")
+WORK3 = dict(WORK, id="https://openalex.org/W3", doi="https://doi.org/10.1/c")
 
 S2_PAYLOAD = {
     "title": "Retinol and the skin barrier",
@@ -754,6 +755,70 @@ class CollectTest(_DbTestCase):
         self.assertEqual(len(session.calls), 2)
         oa_count = self.conn.execute("SELECT COUNT(*) FROM oa_location").fetchone()[0]
         self.assertEqual(oa_count, 0)
+
+    def test_budget_exhausted_during_oa_resolution_keeps_the_already_upserted_paper_and_stops(
+        self,
+    ):
+        """OA 단계의 BudgetExhausted 는 enrich 단계와 의도적으로 다르게 동작한다:
+        그 레코드의 papers 행은 이미(OA 조회 전에) 저장이 끝난 뒤이므로, OA 조회가
+        실패해도 stored 에서 빼지 않는다 — 저장은 되돌리지 않고, 이후 레코드
+        시도만 중단한다. 3건 중 2번째의 unpaywall 에서 402 를 받는 시나리오로
+        (a) report.records 에 1·2번째가 남는지, (b) 2번째의 papers 행이 실제로
+        DB 에 저장돼 있는지, (c) 3번째는 시도조차 안 되는지, (d) stopped_reason
+        이 {"unpaywall": "budget_exhausted"}인지, (e) run.status 가 "partial"인지
+        를 전부 확인한다."""
+        responses = [
+            _search_page([WORK, WORK2, WORK3]),
+            _json_response(S2_PAYLOAD),
+            _json_response(EPMC_PAYLOAD),
+            _json_response(CROSSREF_PAYLOAD),
+            _json_response(UNPAYWALL_PAYLOAD),  # WORK 의 unpaywall — 성공
+            _json_response(S2_PAYLOAD),
+            _json_response(EPMC_PAYLOAD),
+            _json_response(CROSSREF_PAYLOAD),
+            FakeResponse(402),  # WORK2 의 unpaywall — 예산 소진
+        ]
+        transport, session = self._transport(responses)
+
+        report = pipeline.collect(self.conn, transport, "cosmetic", 2016, 2026, 10)
+
+        self.assertEqual(report.status, "partial")  # (e)
+        self.assertEqual(report.stopped_reason, {"unpaywall": "budget_exhausted"})  # (d)
+
+        # (a) 1·2번째 레코드 둘 다 report.records 에 남는다 — 각각 enrich+upsert
+        # 까지는 완전히 끝난 뒤에 OA 단계에서 중단됐을 뿐이다.
+        self.assertEqual(len(report.records), 2)
+        self.assertEqual({r["doi"] for r in report.records}, {"10.1/a", "10.1/b"})
+
+        # (b) 2번째(WORK2)의 papers 행도 실제로 저장돼 있다 — OA 단계 전에
+        # 이미 repository.upsert() 가 끝났기 때문이다.
+        stored_count = self.conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0]
+        self.assertEqual(stored_count, 2)
+        self.assertIsNotNone(
+            self.conn.execute("SELECT 1 FROM papers WHERE doi = '10.1/b'").fetchone()
+        )
+
+        # (c) 3번째(WORK3)는 아예 시도되지 않는다 — 응답 큐를 9개만 줬는데
+        # 그 이상 소비했다면 FakeSession 이 AssertionError 를 던졌을 것이다.
+        self.assertEqual(len(session.calls), 9)
+        self.assertIsNone(
+            self.conn.execute("SELECT 1 FROM papers WHERE doi = '10.1/c'").fetchone()
+        )
+
+        # 1번째(WORK)는 unpaywall 도 성공했으니 oa_location 에 딱 1행만 있다.
+        oa_count = self.conn.execute("SELECT COUNT(*) FROM oa_location").fetchone()[0]
+        self.assertEqual(oa_count, 1)
+        self.assertIsNotNone(
+            self.conn.execute("SELECT 1 FROM oa_location WHERE doi = '10.1/a'").fetchone()
+        )
+
+        unpaywall_row = self.conn.execute(
+            "SELECT * FROM run_source WHERE run_id = ? AND source = 'unpaywall'",
+            (report.run_id,),
+        ).fetchone()
+        self.assertEqual(unpaywall_row["requests"], 2)
+        self.assertEqual(unpaywall_row["records"], 1)
+        self.assertEqual(unpaywall_row["stopped_reason"], "budget_exhausted")
 
     def test_a_pipeline_bug_leaves_the_run_marked_failed_and_re_raises(self):
         """수집 로직 자체가 처리하지 못한 예외로 끝나면 run.status="failed" 로
