@@ -94,6 +94,28 @@ EFETCH_XML_NO_DOI_BACKREFERENCE = """<?xml version="1.0" ?>
 </PubmedArticle>
 </PubmedArticleSet>"""
 
+# 리뷰 대응 — 중첩 마크업(<i>, <sup>, <sub> 등)이 섞인 실제 PubMed 응답 형태.
+# 화장품/피부과 코퍼스에서 <i>학명·성분명</i>(예: Retinol 을 이탤릭으로),
+# <sup>/<sub> 동위원소·화학식 표기(예: "13C", "CO2")는 흔하다. ArticleTitle
+# 과 섹션 초록 양쪽에 넣어 두 경로 모두(_text() 를 공유하는 title/journal/
+# MeSH 와, _abstract_text() 가 섹션마다 _text() 를 호출하는 abstract) 태그
+# 안팎의 텍스트를 잃지 않는지 확인한다.
+EFETCH_XML_NESTED_MARKUP = """<?xml version="1.0" ?>
+<PubmedArticleSet>
+<PubmedArticle>
+<MedlineCitation>
+<PMID>4</PMID>
+<Article>
+<ArticleTitle>Effects of <i>Retinol</i> on skin: a <sup>13</sup>C study</ArticleTitle>
+<Abstract>
+<AbstractText Label="BACKGROUND">Effects of <i>Retinol</i> on skin.</AbstractText>
+<AbstractText Label="METHODS">We measured CO<sub>2</sub> output.</AbstractText>
+</Abstract>
+</Article>
+</MedlineCitation>
+</PubmedArticle>
+</PubmedArticleSet>"""
+
 BROKEN_XML = "<PubmedArticleSet><PubmedArticle><MedlineCitation><PMID>1</PMID>"
 
 RECORD_KEYS = {"title", "abstract", "journal", "mesh_terms", "pmid"}
@@ -133,6 +155,19 @@ class ParseEfetchXmlTest(unittest.TestCase):
         가 아니라 명시적 ValueError 여야 한다(모듈 docstring 참고)."""
         with self.assertRaises(ValueError):
             pubmed.parse_efetch_xml(BROKEN_XML)
+
+    def test_recovers_the_full_title_text_around_nested_markup(self):
+        # <i>/<sup> 안팎의 텍스트가 사라지지 않고 이어붙어야 한다(리뷰 대응).
+        result = pubmed.parse_efetch_xml(EFETCH_XML_NESTED_MARKUP)
+        self.assertEqual(result["title"], "Effects of Retinol on skin: a 13C study")
+
+    def test_recovers_the_full_abstract_text_around_nested_markup_across_sections(self):
+        # 섹션 초록 + 마크업 조합: 두 AbstractText 각각의 <i>/<sub> 안팎
+        # 텍스트가 보존된 채로, 섹션 사이는 여전히 공백 하나로 이어붙는다.
+        result = pubmed.parse_efetch_xml(EFETCH_XML_NESTED_MARKUP)
+        self.assertEqual(
+            result["abstract"], "Effects of Retinol on skin. We measured CO2 output."
+        )
 
 
 class FetchTest(unittest.TestCase):

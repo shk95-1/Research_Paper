@@ -105,11 +105,26 @@ def search_pmids(transport, term, retmax=20):
 
 
 def _text(element):
-    """element 가 있고 텍스트가 있으면 strip 해서 돌려준다. 없으면 None."""
-    if element is None or element.text is None:
+    """element 가 있으면 element 자신 + 모든 자손의 텍스트를 문서 순서대로
+    이어 붙여 돌려준다. 없거나 텍스트가 비어 있으면 None.
+
+    element.text 만 읽으면 중첩 마크업(<i>, <b>, <sub>, <sup> 등) 안쪽과
+    그 뒤(tail)의 텍스트가 조용히 사라진다 — 예를 들어
+    "<ArticleTitle>Effects of <i>Retinol</i> on skin.</ArticleTitle>" 에서
+    element.text 는 "Effects of " 뿐이고 "Retinol on skin." 이 통째로
+    없어진다. 화장품/피부과 코퍼스에서 <i>학명·성분명</i>, <sub>/<sup>
+    화학식·유전자 표기는 실제로 흔하므로(가설적 케이스가 아니다) 이런
+    손실은 논문 제목·MeSH 용어·초록 어디서든 발생할 수 있다.
+    element.itertext() 는 element 자신의 text 부터 각 자식의 text/tail 까지
+    문서 순서대로 순회하므로, 태그를 걷어낸 전체 텍스트를 얻을 수 있다.
+    XML 이 들여쓰기·개행으로 예쁘게 포맷돼 있으면 그 공백도 그대로
+    섞여 들어오므로, 마지막에 공백을 전부 하나로 접어 정규화한다.
+    """
+    if element is None:
         return None
-    stripped = element.text.strip()
-    return stripped or None
+    joined = "".join(element.itertext())
+    normalized = " ".join(joined.split())
+    return normalized or None
 
 
 def _abstract_text(article_el):
@@ -118,16 +133,16 @@ def _abstract_text(article_el):
     AbstractText 가 여러 개(구조화 초록 — Background/Methods/Results 같은
     Label 속성이 붙은 섹션들)일 수 있다. Label 은 무시하고 본문 텍스트만
     등장 순서대로 공백 하나로 이어붙인다 — 이어붙인 결과가 검색·근거
-    표시에 쓸 초록이지, 섹션 구조 자체를 보존할 필요는 없다.
+    표시에 쓸 초록이지, 섹션 구조 자체를 보존할 필요는 없다. 섹션 하나하나의
+    텍스트 추출은 _text() 를 재사용한다 — 섹션 안에 <i>/<sub> 같은 중첩
+    마크업이 있어도(예: "...effects of <i>Retinol</i> on...") 놓치지
+    않는다(모듈 docstring "_text()" 참고).
     """
     abstract_el = article_el.find("Abstract")
     if abstract_el is None:
         return None
-    parts = [
-        section.text.strip()
-        for section in abstract_el.findall("AbstractText")
-        if section.text and section.text.strip()
-    ]
+    sections = abstract_el.findall("AbstractText")
+    parts = [text for text in (_text(section) for section in sections) if text]
     return " ".join(parts) if parts else None
 
 
