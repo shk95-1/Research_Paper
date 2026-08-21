@@ -141,9 +141,102 @@ UNPAYWALL_PAYLOAD = {
     },
 }
 
+# pubmed(T10) — esearch 로 PMID 를 찾고 efetch(XML)로 본문을 가져오는 두 단계
+# 조회다. abstract/journal 을 일부러 비워 뒀다(구성 예시 — 실검증은
+# tool/live_smoke.py 가 한다) — 그래야 이 픽스처를 기존 테스트들의 응답
+# 큐에 끼워 넣어도 "비었을 때만 채운다" 규칙 때문에 S2/EuropePMC 가 이미
+# 채운 abstract/journal 값에 대한 기존 단언들이 그대로 유지된다. mesh_terms
+# 만 이 소스의 진짜 관심사라 채워 둔다.
+PUBMED_ESEARCH_PAYLOAD = {"esearchresult": {"idlist": ["999"], "count": "1"}}
+PUBMED_ESEARCH_EMPTY = {"esearchresult": {"idlist": [], "count": "0"}}
+PUBMED_EFETCH_XML = """<?xml version="1.0" ?>
+<PubmedArticleSet>
+<PubmedArticle>
+<MedlineCitation>
+<PMID>999</PMID>
+<Article>
+<ArticleTitle>Retinol and the skin barrier</ArticleTitle>
+</Article>
+<MeshHeadingList>
+<MeshHeading><DescriptorName>Retinol</DescriptorName></MeshHeading>
+<MeshHeading><DescriptorName>Skin Aging</DescriptorName></MeshHeading>
+</MeshHeadingList>
+</MedlineCitation>
+<PubmedData>
+<ArticleIdList>
+<ArticleId IdType="doi">10.1/a</ArticleId>
+</ArticleIdList>
+</PubmedData>
+</PubmedArticle>
+</PubmedArticleSet>"""
+
+# 위와 달리 abstract 도 함께 채워 둔 변형 — "abstract 는 비었을 때만 채운다"
+# 규칙과 "mesh_terms 는 항상 기록한다" 규칙을 같은 응답으로 동시에 검증할 때 쓴다.
+PUBMED_EFETCH_XML_WITH_ABSTRACT = """<?xml version="1.0" ?>
+<PubmedArticleSet>
+<PubmedArticle>
+<MedlineCitation>
+<PMID>999</PMID>
+<Article>
+<ArticleTitle>Retinol and the skin barrier</ArticleTitle>
+<Abstract><AbstractText>From PubMed.</AbstractText></Abstract>
+</Article>
+<MeshHeadingList>
+<MeshHeading><DescriptorName>Retinol</DescriptorName></MeshHeading>
+</MeshHeadingList>
+</MedlineCitation>
+</PubmedArticle>
+</PubmedArticleSet>"""
+
+# MeshHeadingList 자체가 없는 응답 — "PubMed 는 응답했지만 그 논문에 MeSH 가
+# 없었다"를 흉내낸다. mesh_terms 는 빈 튜플이어야 하고, 그래도 record 에
+# 기록은 돼야 한다(m0006/repository 가 NULL 로 접는 건 그다음 단계).
+PUBMED_EFETCH_XML_NO_MESH = """<?xml version="1.0" ?>
+<PubmedArticleSet>
+<PubmedArticle>
+<MedlineCitation>
+<PMID>999</PMID>
+<Article>
+<ArticleTitle>Retinol and the skin barrier</ArticleTitle>
+</Article>
+</MedlineCitation>
+</PubmedArticle>
+</PubmedArticleSet>"""
+
 
 def _json_response(payload, status=200):
     return FakeResponse(status, body=json.dumps(payload).encode())
+
+
+def _pubmed_responses():
+    """pubmed.fetch() 가 doi 가 있을 때 순차로 만드는 두 응답(esearch, efetch).
+
+    ENRICHERS 순서(semantic_scholar -> europepmc -> pubmed -> crossref)상
+    europepmc 응답과 crossref 응답 사이에 끼워 넣는다.
+    """
+    return [
+        _json_response(PUBMED_ESEARCH_PAYLOAD),
+        FakeResponse(200, body=PUBMED_EFETCH_XML.encode()),
+    ]
+
+
+def _pubmed_not_found_response():
+    """esearch 가 0건을 답한 경우 — efetch 는 아예 호출되지 않는다."""
+    return [_json_response(PUBMED_ESEARCH_EMPTY)]
+
+
+def _pubmed_responses_with_abstract():
+    return [
+        _json_response(PUBMED_ESEARCH_PAYLOAD),
+        FakeResponse(200, body=PUBMED_EFETCH_XML_WITH_ABSTRACT.encode()),
+    ]
+
+
+def _pubmed_responses_no_mesh():
+    return [
+        _json_response(PUBMED_ESEARCH_PAYLOAD),
+        FakeResponse(200, body=PUBMED_EFETCH_XML_NO_MESH.encode()),
+    ]
 
 
 def _search_page(works, next_cursor=None):
@@ -177,9 +270,13 @@ class _DbTestCase(unittest.TestCase):
 class EnricherDataTest(unittest.TestCase):
     """ENRICHERS 는 순서·채움 규칙·캐시 키가 전부 데이터로 선언되어 있어야 한다."""
 
-    def test_declares_three_enrichers_in_semantic_scholar_europepmc_crossref_order(self):
+    def test_declares_four_enrichers_in_semantic_scholar_europepmc_pubmed_crossref_order(self):
+        # T10 — pubmed 가 europepmc 와 crossref 사이에 추가됐다(브리핑 지시
+        # 순서). 예전 이름(test_declares_three_enrichers_...)이 가리키던
+        # "세 소스"는 더 이상 사실이 아니라 이름 자체를 갱신한다.
         self.assertEqual(
-            [e.name for e in pipeline.ENRICHERS], ["semantic_scholar", "europepmc", "crossref"]
+            [e.name for e in pipeline.ENRICHERS],
+            ["semantic_scholar", "europepmc", "pubmed", "crossref"],
         )
 
     def test_crossref_fills_only_the_journal_field(self):
@@ -188,12 +285,14 @@ class EnricherDataTest(unittest.TestCase):
         crossref_enricher = next(e for e in pipeline.ENRICHERS if e.name == "crossref")
         self.assertEqual(crossref_enricher.fills, (("journal", "journal"),))
 
-    def test_semantic_scholar_and_crossref_cache_keys_are_doi_only(self):
+    def test_semantic_scholar_and_crossref_and_pubmed_cache_keys_are_doi_only(self):
         crossref_enricher = next(e for e in pipeline.ENRICHERS if e.name == "crossref")
         s2_enricher = next(e for e in pipeline.ENRICHERS if e.name == "semantic_scholar")
+        pubmed_enricher = next(e for e in pipeline.ENRICHERS if e.name == "pubmed")
         record_without_doi = dict(OPENALEX_RECORD, doi=None)
         self.assertEqual(s2_enricher.cache_key(record_without_doi), "")
         self.assertEqual(crossref_enricher.cache_key(record_without_doi), "")
+        self.assertEqual(pubmed_enricher.cache_key(record_without_doi), "")
 
     def test_europepmc_cache_key_falls_back_to_a_truncated_lowercased_title(self):
         epmc_enricher = next(e for e in pipeline.ENRICHERS if e.name == "europepmc")
@@ -219,6 +318,7 @@ class EnrichTest(_DbTestCase):
             responses=[
                 _json_response(S2_PAYLOAD),
                 _json_response(EPMC_PAYLOAD),
+                *_pubmed_responses(),
                 _json_response(CROSSREF_PAYLOAD),
             ]
         )
@@ -229,6 +329,7 @@ class EnrichTest(_DbTestCase):
             responses=[
                 _json_response(S2_PAYLOAD),
                 _json_response(EPMC_PAYLOAD),
+                *_pubmed_responses(),
                 _json_response(CROSSREF_PAYLOAD),
             ]
         )
@@ -241,6 +342,7 @@ class EnrichTest(_DbTestCase):
             responses=[
                 _json_response(S2_PAYLOAD),
                 _json_response(EPMC_PAYLOAD),
+                *_pubmed_responses(),
                 _json_response(CROSSREF_PAYLOAD),
             ],
         )
@@ -252,6 +354,7 @@ class EnrichTest(_DbTestCase):
             responses=[
                 _json_response(s2_no_abstract),
                 _json_response(EPMC_PAYLOAD),
+                *_pubmed_responses(),
                 _json_response(CROSSREF_PAYLOAD),
             ]
         )
@@ -263,6 +366,7 @@ class EnrichTest(_DbTestCase):
             responses=[
                 _json_response(S2_PAYLOAD),
                 _json_response(EPMC_PAYLOAD),
+                *_pubmed_responses(),
                 _json_response(CROSSREF_PAYLOAD),
             ]
         )
@@ -275,6 +379,7 @@ class EnrichTest(_DbTestCase):
             responses=[
                 _json_response(S2_PAYLOAD),
                 _json_response(EPMC_PAYLOAD),
+                *_pubmed_responses(),
                 _json_response(CROSSREF_PAYLOAD),
             ],
         )
@@ -289,6 +394,7 @@ class EnrichTest(_DbTestCase):
             responses=[
                 _json_response(S2_PAYLOAD),
                 _json_response(EPMC_PAYLOAD),
+                *_pubmed_responses(),
                 _json_response(CROSSREF_PAYLOAD),
             ],
         )
@@ -299,6 +405,7 @@ class EnrichTest(_DbTestCase):
             responses=[
                 _json_response(S2_PAYLOAD),
                 _json_response(EPMC_PAYLOAD),
+                *_pubmed_responses(),
                 _json_response(CROSSREF_PAYLOAD),
             ]
         )
@@ -309,6 +416,7 @@ class EnrichTest(_DbTestCase):
             responses=[
                 _json_response(S2_PAYLOAD),
                 _json_response(EPMC_PAYLOAD),
+                *_pubmed_responses(),
                 _json_response(CROSSREF_PAYLOAD),
             ]
         )
@@ -319,12 +427,13 @@ class EnrichTest(_DbTestCase):
             responses=[
                 _json_response(S2_PAYLOAD),
                 _json_response(EPMC_PAYLOAD),
+                *_pubmed_responses(),
                 _json_response(CROSSREF_PAYLOAD),
             ]
         )
         self.assertEqual(
             result["verification"]["found_in_sources"],
-            ["openalex", "semantic_scholar", "europepmc"],
+            ["openalex", "semantic_scholar", "europepmc", "pubmed"],
         )
 
     def test_omits_a_source_that_returned_not_found(self):
@@ -333,10 +442,13 @@ class EnrichTest(_DbTestCase):
                 responses=[
                     FakeResponse(404),
                     _json_response(EPMC_PAYLOAD),
+                    *_pubmed_responses(),
                     _json_response(CROSSREF_PAYLOAD),
                 ]
             )
-        self.assertEqual(result["verification"]["found_in_sources"], ["openalex", "europepmc"])
+        self.assertEqual(
+            result["verification"]["found_in_sources"], ["openalex", "europepmc", "pubmed"]
+        )
         self.assertIsNone(result["tldr"])
 
     def test_scores_a_fully_enriched_paper_at_one_hundred(self):
@@ -344,6 +456,7 @@ class EnrichTest(_DbTestCase):
             responses=[
                 _json_response(S2_PAYLOAD),
                 _json_response(EPMC_PAYLOAD),
+                *_pubmed_responses(),
                 _json_response(CROSSREF_PAYLOAD),
             ]
         )
@@ -354,11 +467,12 @@ class EnrichTest(_DbTestCase):
             responses=[
                 _json_response(S2_PAYLOAD),
                 _json_response(EPMC_PAYLOAD),
+                *_pubmed_responses(),
                 _json_response(CROSSREF_PAYLOAD),
             ]
         )
         evidence = result["verification"]["evidence"]
-        self.assertEqual(set(evidence), {"semantic_scholar", "europepmc", "crossref"})
+        self.assertEqual(set(evidence), {"semantic_scholar", "europepmc", "pubmed", "crossref"})
         self.assertEqual(evidence["crossref"]["title"], "Retinol and the skin barrier")
 
     def test_stores_a_retraction_row_and_marks_the_record_retracted_when_crossref_flags_one(self):
@@ -369,6 +483,7 @@ class EnrichTest(_DbTestCase):
             responses=[
                 _json_response(S2_PAYLOAD),
                 _json_response(EPMC_PAYLOAD),
+                *_pubmed_responses(),
                 _json_response(CROSSREF_PAYLOAD_RETRACTED),
             ]
         )
@@ -392,6 +507,7 @@ class EnrichTest(_DbTestCase):
             responses=[
                 _json_response(S2_PAYLOAD),
                 _json_response(EPMC_PAYLOAD),
+                *_pubmed_responses(),
                 _json_response(CROSSREF_PAYLOAD_NOTICE),
             ]
         )
@@ -417,6 +533,7 @@ class EnrichTest(_DbTestCase):
             responses=[
                 _json_response(S2_PAYLOAD),
                 _json_response(EPMC_PAYLOAD),
+                *_pubmed_responses(),
                 _json_response(CROSSREF_PAYLOAD),
             ]
         )
@@ -430,6 +547,7 @@ class EnrichTest(_DbTestCase):
                 responses=[
                     _json_response(S2_PAYLOAD),
                     _json_response(EPMC_PAYLOAD),
+                    *_pubmed_responses(),
                     FakeResponse(404),
                 ]
             )
@@ -441,6 +559,7 @@ class EnrichTest(_DbTestCase):
             responses=[
                 _json_response(S2_PAYLOAD),
                 _json_response(EPMC_PAYLOAD),
+                *_pubmed_responses(),
                 _json_response(CROSSREF_PAYLOAD),
             ]
         )
@@ -458,6 +577,7 @@ class EnrichTest(_DbTestCase):
             responses=[
                 _json_response(S2_PAYLOAD),
                 _json_response(EPMC_PAYLOAD),
+                *_pubmed_responses(),
                 _json_response(CROSSREF_PAYLOAD),
             ]
         )
@@ -475,6 +595,7 @@ class EnrichTest(_DbTestCase):
                 responses=[
                     FakeResponse(404),
                     _json_response(EPMC_PAYLOAD),
+                    *_pubmed_responses(),
                     _json_response(CROSSREF_PAYLOAD),
                 ]
             )
@@ -494,7 +615,9 @@ class EnrichTest(_DbTestCase):
             result, _ = self._enrich(
                 responses=(
                     [FakeResponse(503) for _ in range(max_attempts)]
-                    + [_json_response(EPMC_PAYLOAD), _json_response(CROSSREF_PAYLOAD)]
+                    + [_json_response(EPMC_PAYLOAD)]
+                    + _pubmed_responses()
+                    + [_json_response(CROSSREF_PAYLOAD)]
                 )
             )
         self.assertIsNone(result["tldr"])
@@ -515,7 +638,7 @@ class EnrichTest(_DbTestCase):
                 responses=(
                     [_json_response(S2_PAYLOAD)]
                     + [FakeResponse(503) for _ in range(max_attempts)]
-                    + [_json_response(CROSSREF_PAYLOAD)]
+                    + [*_pubmed_responses(), _json_response(CROSSREF_PAYLOAD)]
                 ),
                 error_counts=error_counts,
             )
@@ -536,6 +659,124 @@ class EnrichTest(_DbTestCase):
         self.assertIs(cached, cache.MISS)
 
 
+class PubMedMeshTermsTest(_DbTestCase):
+    """T10 전용: mesh_terms 는 fills 규칙(비었을 때만 채운다)과 무관하게
+    항상 기록되고, pubmed 는 다른 소스와 마찬가지로 found_in_sources 에
+    들어가 추가소스 점수(15/개, 상한 30)를 받는다. score-parity 고정 CASES
+    (test_verify.py)는 pubmed 없는 입력이므로 이 클래스와 무관하게 그대로
+    남아 있다 — 여기서는 pubmed 가 실제로 참여하는 새 케이스만 다룬다."""
+
+    def _enrich(self, record=None, responses=None, error_counts=None):
+        transport, session = self._transport(responses or [])
+        result = pipeline.enrich(
+            self.conn, transport, dict(record or OPENALEX_RECORD), error_counts
+        )
+        return result, session
+
+    def test_mesh_terms_is_recorded_even_when_the_paper_already_has_an_abstract(self):
+        # abstract 는 fills 규칙(비었을 때만 채운다) 때문에 그대로 남지만,
+        # mesh_terms 는 그 규칙과 무관하게 기록돼야 한다.
+        record = dict(OPENALEX_RECORD, abstract="Existing abstract.")
+        result, _ = self._enrich(
+            record=record,
+            responses=[
+                FakeResponse(404),  # semantic_scholar
+                FakeResponse(404),  # europepmc
+                *_pubmed_responses_with_abstract(),
+                FakeResponse(404),  # crossref
+            ],
+        )
+        self.assertEqual(result["abstract"], "Existing abstract.")
+        self.assertEqual(result["mesh_terms"], ("Retinol",))
+
+    def test_pubmed_still_fills_a_missing_abstract(self):
+        # 다른 소스가 채우지 못한 abstract 라면 pubmed 도 다른 enricher 와
+        # 동일하게 "비었을 때만 채운다" 규칙을 따른다.
+        result, _ = self._enrich(
+            responses=[
+                FakeResponse(404),
+                FakeResponse(404),
+                *_pubmed_responses_with_abstract(),
+                FakeResponse(404),
+            ],
+        )
+        self.assertEqual(result["abstract"], "From PubMed.")
+
+    def test_records_an_empty_mesh_terms_tuple_when_pubmed_reports_none(self):
+        # "PubMed 가 응답했지만 이 논문엔 MeSH 가 없었다"도 기록 대상이다 —
+        # NULL 로 접는 건 repository 의 몫이지, pipeline 이 조용히 생략하면
+        # 안 된다(빈 튜플과 "아직 조회 안 함"을 구분하려면 항상 써야 한다).
+        result, _ = self._enrich(
+            responses=[
+                FakeResponse(404),
+                FakeResponse(404),
+                *_pubmed_responses_no_mesh(),
+                FakeResponse(404),
+            ],
+        )
+        self.assertIn("mesh_terms", result)
+        self.assertEqual(result["mesh_terms"], ())
+
+    def test_a_doi_less_paper_never_gets_mesh_terms(self):
+        # pubmed 도 semantic_scholar/crossref 와 같은 이유로 DOI 없는
+        # 논문은 아예 조회하지 않는다(cache_key 가 "") — mesh_terms 키
+        # 자체가 record 에 생기지 않는다.
+        record = dict(OPENALEX_RECORD, doi=None)
+        result, session = self._enrich(record=record, responses=[FakeResponse(404)])  # europepmc
+        self.assertNotIn("mesh_terms", result)
+        self.assertEqual(len(session.calls), 1)
+
+    def test_no_mesh_terms_key_when_pubmed_finds_no_matching_pmid(self):
+        # esearch 0건은 pubmed.fetch() 가 None 을 돌려주는 정상 부재다 —
+        # 다른 소스의 404 와 마찬가지로 evidence/found_in_sources 어디에도
+        # "pubmed" 가 나타나지 않고, mesh_terms 키도 record 에 생기지 않는다.
+        result, session = self._enrich(
+            responses=[
+                FakeResponse(404),  # semantic_scholar
+                FakeResponse(404),  # europepmc
+                *_pubmed_not_found_response(),
+                FakeResponse(404),  # crossref
+            ],
+        )
+        self.assertNotIn("mesh_terms", result)
+        self.assertNotIn("pubmed", result["verification"]["found_in_sources"])
+        self.assertNotIn("pubmed", result["verification"]["evidence"])
+        self.assertEqual(len(session.calls), 4)  # efetch 는 아예 호출되지 않는다
+
+    def test_pubmed_participation_counts_toward_found_in_sources(self):
+        result, _ = self._enrich(
+            responses=[
+                FakeResponse(404),
+                FakeResponse(404),
+                *_pubmed_responses(),
+                FakeResponse(404),
+            ],
+        )
+        self.assertEqual(result["verification"]["found_in_sources"], ["openalex", "pubmed"])
+
+    def test_three_extra_sources_including_pubmed_still_cap_the_score_at_thirty(self):
+        """openalex + semantic_scholar + europepmc + pubmed(3 개의 추가 소스)는
+        규칙대로면 15*3=45 점이지만 SCORE_EXTRA_SOURCE_CAP=30 에서 막힌다.
+        crossref 는 일부러 404 로 빼서(검증 30/제목일치 25 를 관여시키지
+        않고) 상한 계산만 순수하게 드러낸다: 5(기본) + 30(상한) + 10(초록)
+        = 45 — cap 이 없었다면 5 + 45 + 10 = 60 이 됐을 것이다."""
+        record = dict(OPENALEX_RECORD, abstract="Existing abstract.")
+        result, _ = self._enrich(
+            record=record,
+            responses=[
+                _json_response(S2_PAYLOAD),
+                _json_response(EPMC_PAYLOAD),
+                *_pubmed_responses(),
+                FakeResponse(404),  # crossref
+            ],
+        )
+        self.assertEqual(
+            result["verification"]["found_in_sources"],
+            ["openalex", "semantic_scholar", "europepmc", "pubmed"],
+        )
+        self.assertEqual(result["verification"]["confidence_score"], 45)  # 5 + 30(cap) + 10
+
+
 class ErrorCachingMatrixTest(_DbTestCase):
     """오류 타입 5종(NotFound/TransientError/RateLimited/ParseError/
     PermanentError) + BudgetExhausted 각각에 대해 캐시 여부·오류 카운트·전파
@@ -547,10 +788,12 @@ class ErrorCachingMatrixTest(_DbTestCase):
         return semantic_scholar.SemanticScholar.policy.max_attempts
 
     def _enrich(self, s2_responses):
-        # semantic_scholar 이후에도 europepmc/crossref 는 계속 불린다(doi 가
-        # 있으므로 cache_key 가 비지 않는다) — 404 로 끝내 이 두 소스는
-        # 매트릭스 판정에 끼어들지 않게 한다.
-        responses = list(s2_responses) + [FakeResponse(404), FakeResponse(404)]
+        # semantic_scholar 이후에도 europepmc/pubmed/crossref 는 계속
+        # 불린다(doi 가 있으므로 cache_key 가 비지 않는다) — 전부 404 로
+        # 끝내 이 세 소스는 매트릭스 판정에 끼어들지 않게 한다. pubmed 는
+        # esearch 한 번만으로 404(NotFound)가 나면 efetch 를 아예 부르지
+        # 않으므로(fetch() 참고) 다른 두 소스와 마찬가지로 404 하나면 된다.
+        responses = list(s2_responses) + [FakeResponse(404), FakeResponse(404), FakeResponse(404)]
         transport, _ = self._transport(responses)
         error_counts: dict[str, int] = {}
         with quiet():
@@ -605,6 +848,7 @@ class CollectTest(_DbTestCase):
             _search_page([WORK]),
             _json_response(S2_PAYLOAD),
             _json_response(EPMC_PAYLOAD),
+            *_pubmed_responses(),
             _json_response(CROSSREF_PAYLOAD),
             _json_response(UNPAYWALL_PAYLOAD),
             FakeResponse(200),  # collect() 종료 후 같은 transport 로 보내는 요청
@@ -632,6 +876,7 @@ class CollectTest(_DbTestCase):
             _search_page([WORK]),
             _json_response(S2_PAYLOAD),
             _json_response(EPMC_PAYLOAD),
+            *_pubmed_responses(),
             _json_response(CROSSREF_PAYLOAD),
             _json_response(UNPAYWALL_PAYLOAD),
         ]
@@ -643,7 +888,7 @@ class CollectTest(_DbTestCase):
         self.assertEqual(len(report.records), 1)
         self.assertEqual(report.records[0]["verification"]["confidence_score"], 100)
         self.assertEqual(report.stopped_reason, {})
-        self.assertEqual(len(session.calls), 5)
+        self.assertEqual(len(session.calls), 7)  # T10: pubmed 가 esearch+efetch 2건을 더한다
 
         stored_count = self.conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0]
         self.assertEqual(stored_count, 1)
@@ -671,10 +916,17 @@ class CollectTest(_DbTestCase):
             self.assertEqual(row["requests"], 1, source)
             self.assertEqual(row["records"], 1, source)
 
+        # pubmed 는 esearch+efetch 두 요청이라 requests=2 다(다른 소스는 1).
+        pubmed_row = self.conn.execute(
+            "SELECT * FROM run_source WHERE run_id = ? AND source = 'pubmed'", (report.run_id,)
+        ).fetchone()
+        self.assertEqual(pubmed_row["requests"], 2)
+        self.assertEqual(pubmed_row["records"], 1)
+
         fetch_count = self.conn.execute(
             "SELECT COUNT(*) FROM fetch_log WHERE run_id = ?", (report.run_id,)
         ).fetchone()[0]
-        self.assertEqual(fetch_count, 5)
+        self.assertEqual(fetch_count, 7)
 
         oa_row = self.conn.execute(
             "SELECT * FROM oa_location WHERE doi = '10.1/a'"
@@ -698,6 +950,7 @@ class CollectTest(_DbTestCase):
             _search_page([WORK]),
             _json_response(S2_PAYLOAD),
             _json_response(EPMC_PAYLOAD),
+            *_pubmed_responses(),
             _json_response(CROSSREF_PAYLOAD_RETRACTED),
             _json_response(UNPAYWALL_PAYLOAD),
         ]
@@ -731,6 +984,7 @@ class CollectTest(_DbTestCase):
             _search_page([WORK]),
             _json_response(S2_PAYLOAD),
             _json_response(EPMC_PAYLOAD),
+            *_pubmed_responses(),
             _json_response(CROSSREF_PAYLOAD),
             _json_response(UNPAYWALL_PAYLOAD),
         ]
@@ -748,6 +1002,7 @@ class CollectTest(_DbTestCase):
             _search_page([WORK, broken]),
             _json_response(S2_PAYLOAD),
             _json_response(EPMC_PAYLOAD),
+            *_pubmed_responses(),
             _json_response(CROSSREF_PAYLOAD),
             _json_response(UNPAYWALL_PAYLOAD),
         ]
@@ -763,6 +1018,7 @@ class CollectTest(_DbTestCase):
             _search_page([WORK]),
             _json_response(S2_PAYLOAD),
             _json_response(EPMC_PAYLOAD),
+            *_pubmed_responses(),
             _json_response(CROSSREF_PAYLOAD),
             _json_response(UNPAYWALL_PAYLOAD),
         ]
@@ -775,6 +1031,7 @@ class CollectTest(_DbTestCase):
             _search_page([WORK]),
             _json_response(S2_PAYLOAD),
             _json_response(EPMC_PAYLOAD),
+            *_pubmed_responses(),
             _json_response(CROSSREF_PAYLOAD),
             _json_response(UNPAYWALL_PAYLOAD),
         ]
@@ -800,6 +1057,7 @@ class CollectTest(_DbTestCase):
             FakeResponse(402),
             _json_response(S2_PAYLOAD),
             _json_response(EPMC_PAYLOAD),
+            *_pubmed_responses(),
             _json_response(CROSSREF_PAYLOAD),
             _json_response(UNPAYWALL_PAYLOAD),
         ]
@@ -828,6 +1086,7 @@ class CollectTest(_DbTestCase):
             _search_page([WORK, WORK2]),
             _json_response(S2_PAYLOAD),
             _json_response(EPMC_PAYLOAD),
+            *_pubmed_responses(),
             _json_response(CROSSREF_PAYLOAD),
             _json_response(UNPAYWALL_PAYLOAD),  # WORK 의 unpaywall(enrich 완료 후)
             FakeResponse(402),  # WORK2 의 semantic_scholar
@@ -856,6 +1115,7 @@ class CollectTest(_DbTestCase):
         responses = (
             [_search_page([WORK]), _json_response(S2_PAYLOAD)]
             + [FakeResponse(503) for _ in range(max_attempts)]
+            + _pubmed_responses()
             + [_json_response(CROSSREF_PAYLOAD), _json_response(UNPAYWALL_PAYLOAD)]
         )
         transport, _ = self._transport(responses)
@@ -903,10 +1163,12 @@ class CollectTest(_DbTestCase):
             _search_page([WORK, WORK2, WORK3]),
             _json_response(S2_PAYLOAD),
             _json_response(EPMC_PAYLOAD),
+            *_pubmed_responses(),
             _json_response(CROSSREF_PAYLOAD),
             _json_response(UNPAYWALL_PAYLOAD),  # WORK 의 unpaywall — 성공
             _json_response(S2_PAYLOAD),
             _json_response(EPMC_PAYLOAD),
+            *_pubmed_responses(),
             _json_response(CROSSREF_PAYLOAD),
             FakeResponse(402),  # WORK2 의 unpaywall — 예산 소진
         ]
@@ -930,9 +1192,10 @@ class CollectTest(_DbTestCase):
             self.conn.execute("SELECT 1 FROM papers WHERE doi = '10.1/b'").fetchone()
         )
 
-        # (c) 3번째(WORK3)는 아예 시도되지 않는다 — 응답 큐를 9개만 줬는데
+        # (c) 3번째(WORK3)는 아예 시도되지 않는다 — 응답 큐를 정확히 다 썼는데
         # 그 이상 소비했다면 FakeSession 이 AssertionError 를 던졌을 것이다.
-        self.assertEqual(len(session.calls), 9)
+        # (T10: pubmed 의 esearch+efetch 2건 x 레코드 2개 = 4건이 더해져 13이다.)
+        self.assertEqual(len(session.calls), 13)
         self.assertIsNone(
             self.conn.execute("SELECT 1 FROM papers WHERE doi = '10.1/c'").fetchone()
         )
@@ -1033,6 +1296,7 @@ class ScoreInvarianceTest(_DbTestCase):
             _search_page([WORK]),
             _json_response(S2_PAYLOAD),
             _json_response(EPMC_PAYLOAD),
+            *_pubmed_responses(),
             _json_response(CROSSREF_PAYLOAD),
             unpaywall_response,
         ]

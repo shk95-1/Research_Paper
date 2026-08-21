@@ -83,6 +83,7 @@ class PublicRecordTest(unittest.TestCase):
             "is_retracted",
             "journal",
             "keywords",
+            "mesh_terms",
             "openalex_id",
             "title",
             "tldr",
@@ -98,6 +99,7 @@ class PublicRecordTest(unittest.TestCase):
         self.assertIsNone(result["doi"])
         self.assertIsNone(result["abstract"])
         self.assertEqual(result["authors"], [])
+        self.assertEqual(result["mesh_terms"], [])  # T10 — 다른 list 필드와 동일하게 [] 기본값
 
     def test_exposes_is_retracted_at_top_level_from_nested_verification(self):
         # 버그 수정의 핵심: 최상위 is_retracted 는 verification.is_retracted 를 따른다.
@@ -220,6 +222,23 @@ class RepositoryTest(unittest.TestCase):
         self.assertEqual(got[0]["authors"], ["Kim", "Lee"])
         self.assertTrue(got[0]["is_open_access"])
         self.assertFalse(got[0]["is_retracted"])
+
+    def test_stores_and_round_trips_mesh_terms(self):
+        # T10 — PubMed 가 채우는 필드. tuple 로 와도(파이프라인의 실제 사용
+        # 형태) JSON 직렬화/역직렬화를 거쳐 리스트로 round-trip 해야 한다.
+        repository.upsert(
+            self.conn, record(mesh_terms=("Retinol", "Skin Aging")), verification()
+        )
+        row = self.conn.execute("SELECT mesh_terms FROM papers").fetchone()
+        self.assertEqual(json.loads(row["mesh_terms"]), ["Retinol", "Skin Aging"])
+        got = repository.all_records(self.conn)
+        self.assertEqual(got[0]["mesh_terms"], ["Retinol", "Skin Aging"])
+
+    def test_an_absent_mesh_terms_stays_null(self):
+        # NULL = "아직 PubMed 를 조회하지 않았다 또는 무결과"(m0006 docstring).
+        repository.upsert(self.conn, record(), verification())
+        row = self.conn.execute("SELECT mesh_terms FROM papers").fetchone()
+        self.assertIsNone(row["mesh_terms"])
 
     def test_search_matches_keyword_case_insensitively_in_title(self):
         repository.upsert(self.conn, record(), verification())
@@ -371,6 +390,22 @@ class MergeUpsertTest(unittest.TestCase):
         stored = self._stored()
         self.assertEqual(stored["keywords"], [])
         self.assertEqual(stored["topics"], [])
+
+    def test_an_empty_mesh_terms_tuple_is_stored_as_null_and_restored_as_an_empty_list(self):
+        # T10 — pipeline.enrich() 가 "PubMed 는 응답했지만 MeSH 가 없었다"를
+        # 빈 튜플로 기록한다. m0006 docstring 대로 그 상태도 NULL 로 접힌다
+        # (즉 "무결과"와 "아직 조회 안 함"을 이 컬럼만으로는 구분하지 않는다).
+        repository.upsert(self.conn, record(mesh_terms=()), verification())
+        row = self.conn.execute("SELECT mesh_terms FROM papers").fetchone()
+        self.assertIsNone(row["mesh_terms"])
+        self.assertEqual(self._stored()["mesh_terms"], [])
+
+    def test_a_poor_re_collection_does_not_erase_previously_collected_mesh_terms(self):
+        # PubMed 조회를 건너뛴(또는 실패한) 재수집이 예전에 얻은 MeSH 를
+        # 지우면 안 된다 — 다른 content 필드(abstract/tldr)와 같은 병합 규칙.
+        repository.upsert(self.conn, record(mesh_terms=("Retinol", "Skin Aging")), verification())
+        repository.upsert(self.conn, record(mesh_terms=None), verification())
+        self.assertEqual(self._stored()["mesh_terms"], ["Retinol", "Skin Aging"])
 
     def test_a_missing_is_open_access_does_not_clobber_a_previously_known_true(self):
         repository.upsert(self.conn, record(is_open_access=True), verification())

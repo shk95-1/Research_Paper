@@ -1,4 +1,4 @@
-"""실제 API 를 때리는 스모크 테스트 — 5개 소스의 실제 응답 형태 드리프트 감지용.
+"""실제 API 를 때리는 스모크 테스트 — 6개 소스(T10 의 pubmed 포함)의 실제 응답 형태 드리프트 감지용.
 
 papers/tests/live_smoke.py(T7 에서 제거된 구 버전)를 paper_radar.sources /
 paper_radar.transport 계약 기준으로 이식했다. 파일이 tool/ 아래 있고
@@ -23,7 +23,7 @@ import unittest
 
 from dotenv import load_dotenv
 
-from paper_radar.sources import crossref, europepmc, openalex, semantic_scholar, unpaywall
+from paper_radar.sources import crossref, europepmc, openalex, pubmed, semantic_scholar, unpaywall
 from paper_radar.transport.errors import NotFound
 from paper_radar.transport.http import Transport
 
@@ -110,6 +110,25 @@ class LiveSmokeTest(unittest.TestCase):
             " care products into an existing aggregate exposure model",
         )
         self.assertIsNotNone(result, "제목 검색이 실패했습니다")
+
+    def test_pubmed_still_resolves_a_doi_to_a_pmid_with_mesh_terms(self):
+        # esearch [DOI] -> efetch 두 요청이 이 한 번의 호출 안에서 순차로
+        # 일어난다(pubmed.py 모듈 docstring 참고).
+        try:
+            result = pubmed.fetch(self.transport, doi=KNOWN_DOI)
+        except NotFound:
+            self.skipTest("PubMed 가 이 DOI 조회를 404 로 답했습니다")
+        if result is None:
+            self.skipTest("PubMed 가 이 DOI 를 색인하지 않았습니다(esearch 0건)")
+        self.assertTrue(result["title"], "title 을 꺼내지 못했습니다")
+        self.assertIsInstance(
+            result["mesh_terms"], tuple, "mesh_terms 는 항상 tuple 이어야 합니다"
+        )
+
+    def test_pubmed_still_reports_no_pmids_for_an_unknown_doi(self):
+        # 0건은 오류가 아니라 정상적인 부재다 — esearch 가 빈 idlist 를 준다.
+        pmids = pubmed.search_pmids(self.transport, "10.9999/definitely-not-a-real-doi[DOI]")
+        self.assertEqual(pmids, [])
 
     def test_unpaywall_still_returns_a_record_shaped_response(self):
         # is_oa 가 true 든 false 든(엠바고·정책은 시간에 따라 바뀐다) 최소한

@@ -124,6 +124,14 @@ class MigrateOnAnEmptyDatabaseTest(unittest.TestCase):
             {"doi", "retraction_doi", "update_type", "update_date", "source"},
         )
 
+    def test_migrate_adds_the_mesh_terms_column(self):
+        # T10 — m0006. 새 테이블이 아니라 papers 기존 컬럼 추가라 위
+        # test_migrate_creates_every_expected_table()의 테이블 집합에는
+        # 나타나지 않는다 — 컬럼 존재는 여기서 별도로 확인한다.
+        schema.migrate(self.conn)
+        columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(papers)")}
+        self.assertIn("mesh_terms", columns)
+
 
 class AdoptsALegacyDatabaseTest(unittest.TestCase):
     """papers/store.py 가 만들던 것과 같은 모양(버전 개념이 없는) DB 위에서."""

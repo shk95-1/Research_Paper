@@ -67,11 +67,14 @@ RECORD_FIELDS = (
     "verification",
     "collected_at",
     "is_retracted",
+    "mesh_terms",  # T10 — PubMed 가 채우는 MeSH 용어. 의도된 스키마 확장(보고서 참고)
 )
-LIST_FIELDS = ("authors", "keywords", "topics")
+LIST_FIELDS = ("authors", "keywords", "topics", "mesh_terms")
 
 # upsert 시 COALESCE(excluded.col, papers.col) 로 병합하는 "내용" 컬럼.
 # 재수집이 빈약해도(예: abstract 를 못 얻음) 예전에 얻은 값을 지우지 않는다.
+# mesh_terms 도 다른 소스가 채울 수 없는 내용 필드라 여기 포함한다(PubMed
+# 조회를 건너뛴 재수집이 예전에 얻은 MeSH 를 지우지 않게).
 MERGE_COLUMNS = (
     "title",
     "authors",
@@ -86,6 +89,7 @@ MERGE_COLUMNS = (
     "url",
     "doi",
     "openalex_id",
+    "mesh_terms",
 )
 
 # upsert 시 excluded.col 로 무조건 덮어쓰는 "검증" 컬럼 + raw.
@@ -220,6 +224,7 @@ def _unflatten(row) -> dict:
         "url": row["url"],
         "verification": verification,
         "collected_at": row["collected_at"],
+        "mesh_terms": _list(row["mesh_terms"]),
     }
 
 
@@ -256,6 +261,7 @@ def upsert(conn: sqlite3.Connection, record: dict, verification: dict) -> None:
         "tldr": _norm_str(clean["tldr"]),
         "keywords": _norm_list_json(clean["keywords"]),
         "topics": _norm_list_json(clean["topics"]),
+        "mesh_terms": _norm_list_json(clean["mesh_terms"]),
         "citation_count": clean["citation_count"],
         "is_open_access": _norm_bool_or_null(clean["is_open_access"]),
         "url": _norm_str(clean["url"]),

@@ -1,11 +1,13 @@
 """evidence 수집 파이프라인 조립 — papers/pipeline.py 의 데이터 주도 재조립.
 
-OpenAlex 로 찾고, 나머지 세 소스로 빈 칸을 메우고, 점수를 매겨 저장한다.
+OpenAlex 로 찾고, 나머지 소스들로 빈 칸을 메우고, 점수를 매겨 저장한다.
 papers/pipeline.py 는 이 조립을 하드코딩된 순서로 했다(semantic_scholar ->
-europepmc -> crossref 를 함수 본문에 직접 나열). 이 모듈은 그 순서를
-ENRICHERS: tuple[Enricher, ...] 라는 데이터로 뽑아낸다 — 순서·채움 규칙·
-캐시 키가 전부 한 곳에 선언되어 있어, "소스를 하나 더 추가하려면 어디를
-고쳐야 하나"라는 질문에 "ENRICHERS 에 항목 하나"로 답할 수 있다.
+europepmc -> crossref 를 함수 본문에 직접 나열, 세 소스뿐이었다). 이 모듈은
+그 순서를 ENRICHERS: tuple[Enricher, ...] 라는 데이터로 뽑아낸다 — 순서·
+채움 규칙·캐시 키가 전부 한 곳에 선언되어 있어, "소스를 하나 더 추가하려면
+어디를 고쳐야 하나"라는 질문에 "ENRICHERS 에 항목 하나"로 답할 수 있다.
+T10 이 이 형태 그대로 pubmed 를 europepmc 와 crossref 사이에 추가했다 —
+지금은 semantic_scholar -> europepmc -> pubmed -> crossref 네 소스다.
 
 빈 칸 채우기 원칙 (papers/pipeline.py 와 동일)
     이미 값이 있으면 덮지 않는다. OpenAlex 를 1차 출처로 보고 나머지는
@@ -58,7 +60,7 @@ from urllib.parse import urlsplit
 from paper_radar import registry
 from paper_radar.evidence import verify
 from paper_radar.models import OaLocationRecord, RetractionRecord
-from paper_radar.sources import crossref, europepmc, openalex, semantic_scholar, unpaywall
+from paper_radar.sources import crossref, europepmc, openalex, pubmed, semantic_scholar, unpaywall
 from paper_radar.storage import cache, repository
 from paper_radar.storage.runlog import RunLog
 from paper_radar.transport import warn
@@ -74,7 +76,14 @@ from paper_radar.transport.http import Transport
 
 # 캐시·error_counts 에서 예상치 못한 KeyError 를 피하려고 warn+카운트 대상으로
 # 묶는 오류 타입들. NotFound 와 BudgetExhausted 는 각각 별도 분기라 여기 없다.
-_WARN_AND_COUNT = (TransientError, RateLimited, ParseError, PermanentError)
+# ValueError(T10): pubmed.parse_efetch_xml() 이 깨진/예상 밖 XML 을 만나면
+# transport.errors 의 타입이 아니라 명시적 ValueError 를 던진다(efetch 응답은
+# JSON 이 아니라 XML 이라 transport.get_json() 의 ParseError 경로를 타지
+# 않기 때문 — pubmed.py 모듈 docstring 참고). "업스트림이 확정적으로 없다고
+# 답했다"(NotFound)가 아니라 "이번 응답을 이해하지 못했다"는 뜻이므로 다른
+# TransientError 류와 똑같이 warn+카운트하고 캐시하지 않는다 — 영구 부재로
+# 캐시해 버리면 다음 실행이 재시도할 기회를 잃는다.
+_WARN_AND_COUNT = (TransientError, RateLimited, ParseError, PermanentError, ValueError)
 
 # oa_location 캐시 조회에 쓰는 source 이름. cache 테이블의 (source, key) 는
 # ENRICHERS 의 이름들과 겹치지 않아야 한다 — "unpaywall" 은 ENRICHERS 에
@@ -175,6 +184,22 @@ ENRICHERS: tuple[Enricher, ...] = (
         ),
     ),
     Enricher(
+        name="pubmed",
+        # DOI 로만 조회한다(semantic_scholar/crossref 와 동일한 이유 —
+        # pubmed.py 는 제목 검색을 지원하지 않는다). mesh_terms 는 fills
+        # 규칙(비었을 때만 채움)으로 표현할 수 없어(다른 소스가 절대 채우지
+        # 못하는 필드라 "비었으면 채운다"와 "항상 기록한다"가 관측상 같은
+        # 결과를 내지만, "항상"이 의도임을 명시하려고) fills 에 넣지 않고
+        # enrich() 안에서 별도로 처리한다(crossref 의 retractions 처리와
+        # 같은 결의 예외).
+        cache_key=lambda record: record.get("doi") or "",
+        call=lambda transport, record: pubmed.fetch(transport, doi=record.get("doi")),
+        fills=(
+            ("abstract", "abstract"),
+            ("journal", "journal"),
+        ),
+    ),
+    Enricher(
         name="crossref",
         cache_key=lambda record: record.get("doi") or "",
         call=lambda transport, record: crossref.fetch(transport, doi=record.get("doi")),
@@ -249,6 +274,17 @@ def enrich(conn, transport, record, error_counts=None):
         if result:
             evidence[enricher.name] = result
             _apply_fills(record, result, enricher.fills)
+            if enricher.name == "pubmed":
+                # mesh_terms 는 다른 소스가 채울 수 없는 필드라 "비었을 때만
+                # 채운다"는 _fill()/_apply_fills() 규칙과 무관하게 항상
+                # 기록한다 — PubMed 가 성공적으로 응답했다는 사실 자체가
+                # 최신 관측이고, 그 논문에 정말로 MeSH 가 없는 경우(빈 튜플)
+                # 와 "아직 PubMed 를 조회하지 않음"(레코드에 이 키 자체가
+                # 없음)을 구분하려면 빈 결과도 그대로 써야 한다 — 빈 튜플을
+                # NULL 로 접는 정규화는 repository._norm_list_json() 이
+                # 담당한다(캐시를 거친 result 는 JSON 왕복으로 tuple 이
+                # list 가 되어 있을 수 있어 여기서 다시 tuple() 로 통일한다).
+                record["mesh_terms"] = tuple(result.get("mesh_terms") or ())
             if enricher.name != "crossref":
                 sources.append(enricher.name)
 

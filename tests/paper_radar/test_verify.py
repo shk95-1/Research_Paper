@@ -408,6 +408,27 @@ class ScoreParityWithLegacyTest(unittest.TestCase):
                 "has_doi": True,
             },
         },
+        {
+            # T10 — pubmed 참여 케이스(브리핑 지시): 위 케이스들은 전부
+            # pubmed 없는 입력이라 불변으로 남겨두고, 이 케이스 하나만 새로
+            # 추가해 pubmed 도 "추가 소스"로서 상한(30) 계산에 들어가는지
+            # 확인한다. openalex + 3개 소스(semantic_scholar/europepmc/
+            # pubmed) = 45점 자격이지만 SCORE_EXTRA_SOURCE_CAP=30 에 막혀
+            # 100 을 넘지 않는다(5 + 30 + 25 + 30 + 10 = 100, 애초에 100
+            # 상한과 겹쳐 100 이 나온다 — cap 이 실제로 개입했는지는 아래
+            # ScoreInvarianceTest 류가 아니라 evidence.pipeline 쪽 전용
+            # 테스트가 별도로 확인한다).
+            "record": record(),
+            "found_in_sources": ["openalex", "semantic_scholar", "europepmc", "pubmed"],
+            "crossref": {"title": "Retinol and the skin barrier"},
+            "expected": {
+                "confidence_score": 100,
+                "crossref_verified": True,
+                "title_match": True,
+                "is_retracted": False,
+                "has_doi": True,
+            },
+        },
     ]
 
     def test_confidence_score_matches_the_fixed_legacy_baseline_for_every_case(self):
