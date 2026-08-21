@@ -30,10 +30,23 @@ None 의 의미
     search()/trend() 는 실패를 None 이나 빈 결과로 흡수하지 않는다 — 그건
     "이 입력으로 조회 자체가 불가능하다"는 뜻이 아니라 전송이 실패했다는
     뜻이므로, transport 가 던지는 타입 있는 예외가 그대로 전파된다.
+
+페이지네이션 중간 실패와 iter_search (T5a 리뷰 Important 대응)
+    OpenAlex 는 요청당 과금(계량제)이다. search() 가 리스트를 통째로 모아
+    반환하는 방식이면, 중간 페이지에서 예외(특히 BudgetExhausted)가 나는
+    순간 그 이전 페이지들 — 이미 돈을 지불한 결과 — 이 예외와 함께 통째로
+    사라진다. iter_search() 는 페이지를 받을 때마다 그 페이지의 레코드를
+    즉시 yield 하므로, 호출자가 제너레이터를 직접 순회하면 예외가 나기
+    전까지 넘어온 레코드는 이미 호출자 손에 남아 있다. 예외 객체 자체에
+    부분 결과를 부착하지는 않는다(예: exc.partial) — transport.errors 의
+    타입 계약을 흐리고 싶지 않기 때문이다. search() 는 이 제너레이터를
+    list() 로 감싼 편의 함수일 뿐이라 여전히 중간 실패 시 통째로 예외만
+    던진다 — 부분 결과가 필요하면 iter_search() 를 직접 쓰라.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import ClassVar
 
 from paper_radar.contract import SourcePolicy
@@ -165,30 +178,46 @@ def _filter(query, year_from, year_to):
     )
 
 
-def search(transport, query, year_from, year_to, limit):
-    """커서 페이지네이션으로 limit 건까지 모은다.
+def iter_search(transport, query, year_from, year_to, limit) -> Iterator[dict]:
+    """커서 페이지네이션으로 limit 건까지, 페이지를 받는 즉시 그 페이지의
+    레코드를 하나씩 yield 한다.
 
-    실패(네트워크·재시도 소진 등)는 흡수하지 않는다 — transport 의 타입 있는
-    예외가 그대로 전파된다(기존 papers/sources/openalex.py 는 실패 시 그때까지
-    모은 결과만 돌려줬지만, "오류는 타입이다"라는 새 계약 아래서는 그 판단을
-    파이프라인에 맡긴다).
+    중간에 transport 예외(예: 몇 페이지를 이미 받아 과금된 뒤 BudgetExhausted)
+    가 나면 그대로 전파한다 — 다만 그 전에 yield 된 레코드는 이미 호출자
+    손에 있으므로 예외와 함께 사라지지 않는다. 부분 결과가 필요 없다면
+    search() 를 쓰라.
     """
-    records = []
+    yielded = 0
     cursor = "*"
-    while len(records) < limit and cursor:
+    while yielded < limit and cursor:
         params = [
             ("filter", _filter(query, year_from, year_to)),
             ("select", SELECT),
-            ("per-page", str(min(PER_PAGE_MAX, limit - len(records)))),
+            ("per-page", str(min(PER_PAGE_MAX, limit - yielded))),
             ("cursor", cursor),
         ]
         payload = transport.get_json(BASE, params=params, policy=OpenAlex.policy)
-        results = (payload or {}).get("results") or []
+        results = payload.get("results") or []
         if not results:
-            break
-        records.extend(to_record(work) for work in results)
-        cursor = (payload or {}).get("meta", {}).get("next_cursor")
-    return records[:limit]
+            return
+        for work in results:
+            if yielded >= limit:
+                return
+            yield to_record(work)
+            yielded += 1
+        cursor = payload.get("meta", {}).get("next_cursor")
+
+
+def search(transport, query, year_from, year_to, limit):
+    """iter_search() 를 리스트로 모으는 편의 래퍼.
+
+    중간 실패 시 부분 결과를 반환하지 않는다 — transport 의 타입 있는 예외가
+    그대로 전파된다(기존 papers/sources/openalex.py 는 실패 시 그때까지 모은
+    결과만 돌려줬지만, "오류는 타입이다"라는 새 계약 아래서는 그 판단을
+    파이프라인에 맡긴다). 예외가 나기 전까지 받은 레코드를 잃고 싶지 않은
+    호출자는 iter_search() 를 직접 순회해야 한다.
+    """
+    return list(iter_search(transport, query, year_from, year_to, limit))
 
 
 def trend(transport, query, year_from, year_to):
@@ -199,7 +228,7 @@ def trend(transport, query, year_from, year_to):
         ("per-page", str(GROUP_PER_PAGE)),
     ]
     payload = transport.get_json(BASE, params=params, policy=OpenAlex.policy)
-    groups = (payload or {}).get("group_by") or []
+    groups = payload.get("group_by") or []
     counts = []
     for group in groups:
         key = str((group or {}).get("key", ""))

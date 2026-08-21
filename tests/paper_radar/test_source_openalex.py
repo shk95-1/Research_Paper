@@ -14,7 +14,7 @@ import unittest
 
 from paper_radar.registry import SOURCES
 from paper_radar.sources import openalex
-from paper_radar.transport.errors import TransientError
+from paper_radar.transport.errors import BudgetExhausted, TransientError
 from paper_radar.transport.http import Transport
 from tests.paper_radar.test_transport import FakeResponse, FakeSession, make_clock_and_sleep
 
@@ -235,7 +235,9 @@ class DriverTest(unittest.TestCase):
     def test_propagates_a_transient_error_instead_of_absorbing_it(self):
         """구 papers/sources/openalex.py 는 실패 시 그때까지 모은 결과만 돌려줬지만,
         새 계약에서는 그 판단(무엇을 실패로 볼지)이 파이프라인 몫이라 소스는 흡수하지
-        않고 그대로 전파해야 한다."""
+        않고 그대로 전파해야 한다. search() 는 iter_search() 의 list() 래퍼로
+        바뀐 뒤에도 이 동작(부분 결과를 반환하지 않고 예외만 던짐)이 그대로다 —
+        부분 결과가 필요하면 호출자가 iter_search() 를 직접 써야 한다."""
         policy_attempts = openalex.OpenAlex.policy.max_attempts
         transport, session = self._transport([FakeResponse(503) for _ in range(policy_attempts)])
         with self.assertRaises(TransientError):
@@ -264,6 +266,65 @@ class DriverTest(unittest.TestCase):
         payload = {"group_by": [{"key": "unknown", "count": 5}, {"key": "2020", "count": 1}]}
         transport, _ = self._transport([_json_response(payload)])
         self.assertEqual(openalex.trend(transport, "cosmetic", 2016, 2026), [(2020, 1)])
+
+
+class IterSearchTest(unittest.TestCase):
+    """iter_search() — 페이지를 받는 즉시 그 페이지의 레코드를 yield 한다.
+    search()가 list()로 통째로 모으는 것과 달리, 중간 실패가 나도 이미 넘어온
+    레코드는 호출자 손에 남는다는 것이 이 리뷰 대응의 핵심이다."""
+
+    def _transport(self, responses):
+        clock, sleep, _ = make_clock_and_sleep()
+        session = FakeSession(responses)
+        return Transport(session=session, clock=clock, sleep=sleep), session
+
+    def test_yields_records_page_by_page_without_prefetching_further_pages(self):
+        """한 페이지 안의 레코드를 다 꺼내기 전까지는 다음 페이지를 요청하지
+        않아야 한다 — yield 가 실제로 페이지 단위로 일어난다는 증거다."""
+        pages = [
+            _json_response({"results": [WORK, WORK], "meta": {"next_cursor": "c2"}}),
+            _json_response({"results": [WORK], "meta": {"next_cursor": None}}),
+        ]
+        transport, session = self._transport(pages)
+        records = openalex.iter_search(transport, "cosmetic", 2016, 2026, limit=3)
+
+        first = next(records)
+        self.assertEqual(len(session.calls), 1)  # 첫 페이지만 요청된 상태
+        second = next(records)
+        self.assertEqual(len(session.calls), 1)  # 같은 페이지 안의 두 번째 레코드 — 추가 요청 없음
+        third = next(records)
+        self.assertEqual(len(session.calls), 2)  # limit 을 채우려 두 번째 페이지를 요청했다
+
+        self.assertEqual([first, second, third], [openalex.to_record(WORK)] * 3)
+        with self.assertRaises(StopIteration):
+            next(records)
+
+    def test_preserves_already_yielded_records_when_a_later_page_raises(self):
+        """2페이지째에서 BudgetExhausted 가 나도 1페이지째에서 이미 yield 된
+        레코드는 호출자 손에 남아 있어야 한다 — OpenAlex 는 요청당 과금이므로
+        이미 지불한 페이지를 버리면 실제 손실이다. list() 로 감싸지 않고
+        for 문으로 직접 소비해서 확인한다(list() 로 감싸면 예외가 나는 순간
+        이미 모은 것까지 통째로 사라지므로 이 불변식을 증명하지 못한다)."""
+        responses = [
+            _json_response({"results": [WORK, WORK], "meta": {"next_cursor": "c2"}}),
+            FakeResponse(402),  # BudgetExhausted — 재시도 없이 즉시 던져진다
+        ]
+        transport, session = self._transport(responses)
+        records = openalex.iter_search(transport, "cosmetic", 2016, 2026, limit=10)
+
+        collected = []
+        with self.assertRaises(BudgetExhausted):
+            for record in records:
+                collected.append(record)
+
+        self.assertEqual(collected, [openalex.to_record(WORK), openalex.to_record(WORK)])
+        self.assertEqual(len(session.calls), 2)
+
+    def test_never_yields_more_than_the_limit(self):
+        page = _json_response({"results": [WORK] * 50, "meta": {"next_cursor": "c2"}})
+        transport, _ = self._transport([page])
+        records = list(openalex.iter_search(transport, "cosmetic", 2016, 2026, limit=2))
+        self.assertEqual(len(records), 2)
 
 
 class RegistryTest(unittest.TestCase):
