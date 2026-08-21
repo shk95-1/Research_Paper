@@ -14,6 +14,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from paper_radar.contract import Fetch, SourcePolicy
 from paper_radar.evidence import pipeline
 from paper_radar.sources import europepmc, semantic_scholar
 from paper_radar.storage import cache, repository
@@ -479,6 +480,36 @@ class ErrorCachingMatrixTest(_DbTestCase):
 
 class CollectTest(_DbTestCase):
     """collect() — 검색부터 저장, RunLog 자기기록까지 전 과정."""
+
+    def test_reusing_the_same_transport_after_collect_does_not_leak_into_the_finished_run(self):
+        """collect() 가 설치한 observer 를 떼어내지 않으면, 같은 Transport 를
+        재사용한 다음 요청이 끝난 run_id 로 계속 fetch_log 에 쌓인다(누수) —
+        collect() 종료 후에는 관측 훅이 원래 상태(observer 없음)로 되돌아가
+        있어야 한다."""
+        responses = [
+            _search_page([WORK]),
+            _json_response(S2_PAYLOAD),
+            _json_response(EPMC_PAYLOAD),
+            _json_response(CROSSREF_PAYLOAD),
+            FakeResponse(200),  # collect() 종료 후 같은 transport 로 보내는 요청
+        ]
+        transport, _ = self._transport(responses)
+
+        report = pipeline.collect(self.conn, transport, "cosmetic", 2016, 2026, 10)
+        fetch_count_after_collect = self.conn.execute(
+            "SELECT COUNT(*) FROM fetch_log WHERE run_id = ?", (report.run_id,)
+        ).fetchone()[0]
+        self.assertGreater(fetch_count_after_collect, 0)  # collect() 진행 중에는 정상 기록됨
+
+        transport.request(
+            Fetch(url="https://api.example.org/x"),
+            SourcePolicy(host="api.example.org", min_interval_s=0.0),
+        )
+
+        fetch_count_after_reuse = self.conn.execute(
+            "SELECT COUNT(*) FROM fetch_log WHERE run_id = ?", (report.run_id,)
+        ).fetchone()[0]
+        self.assertEqual(fetch_count_after_reuse, fetch_count_after_collect)
 
     def test_a_full_run_stores_enriches_and_records_run_metadata(self):
         responses = [

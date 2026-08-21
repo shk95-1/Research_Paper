@@ -233,7 +233,10 @@ def collect(
     이미 만들어진 transport 에 set_observer() 로 나중에 붙인다. host -> source
     매핑은 registry.SOURCES 의 policy.host 로 만든다(Semantic Scholar 는
     current_policy() 로 인터벌만 바꾸고 host 는 ClassVar policy 와 항상
-    같으므로 이 매핑에 영향이 없다).
+    같으므로 이 매핑에 영향이 없다). finally 에서 이 observer 를 다시 떼어내고
+    이전 observer 로 되돌린다 — 안 그러면 Transport 인스턴스가 collect() 이후
+    재사용될 때 끝난 run_id 로 fetch_log 가 계속 쌓이거나(원래 collect() 를
+    다시 부르는 경우), 호출자가 미리 걸어 둔 observer 가 사라진다.
     """
     run = RunLog(conn)
     run_id = run.start(
@@ -261,7 +264,13 @@ def collect(
             error=error,
         )
 
-    transport.set_observer(observer)
+    # 이전 observer 를 기억해 뒀다가 finally 에서 되돌린다 — Transport 인스턴스가
+    # collect() 종료 후에도 재사용될 수 있는데(같은 프로세스가 collect() 를 다시
+    # 부르거나, 호출자가 자기 observer 를 걸어 둔 transport 를 넘기는 경우), 이걸
+    # 안 하면 (a) 끝난 run_id 를 클로저로 문 이 콜백이 다음 요청에도 계속 불려
+    # fetch_log 에 죽은 run 의 행이 계속 쌓이거나 (b) 바깥 호출자가 원래 걸어
+    # 뒀던 observer 가 조용히 사라진다.
+    previous_observer = transport.set_observer(observer)
 
     # finally 가 이 값을 그대로 기록한다 — 아래에서 "ok"/"partial" 로 갱신하지
     # 못하고 예외가 새면 "failed" 가 남는다(죽은 run 이 running 으로 안 남게).
@@ -321,3 +330,4 @@ def collect(
         )
     finally:
         run.finish(run_id, status)
+        transport.set_observer(previous_observer)

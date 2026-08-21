@@ -16,9 +16,12 @@ evidence collect/trend 는 네트워크를 쓴다. evidence cite 는 로컬 DB �
     때 GROUPS 에 항목 하나만 추가하면 된다.
 
 exit code
-    0   완전 수집(오류·예산 중단 없음) — cite/trend 는 결과 유무와 무관하게 항상 0.
-    1   부분 수집 — BudgetExhausted 로 중단됐거나 소스 오류가 하나라도 있었다
-        (evidence.pipeline.CollectReport.stopped_reason/errors_by_source 로 판정).
+    0   완전 수집(evidence.pipeline.CollectReport.status == "ok") — cite/trend 는
+        결과 유무와 무관하게 항상 0.
+    1   부분 수집(status == "partial" — BudgetExhausted 로 중단됐거나 소스
+        오류가 하나라도 있었다). "ok"/"partial" 판정은 pipeline.collect()
+        한 곳에서만 계산한다 — CLI 는 report.status 를 그대로 옮길 뿐,
+        stopped_reason/errors_by_source 를 다시 훑어 재계산하지 않는다.
     2   예약(reserved). 이번 태스크(T5b)에서는 배정하지 않는다. 파이프라인
         자체가 처리되지 않은 예외로 죽으면(버그 등, RunLog 에는 status="failed"
         로 남는다) 이 CLI 는 그 예외를 따로 잡지 않고 그대로 흘려보낸다 —
@@ -143,7 +146,10 @@ def _run_collect(args):
         with_abstract = sum(1 for r in records if r.get("abstract"))
         print(f"  신뢰도 70점 이상: {high}건 / 초록 확보: {with_abstract}건")
         print(f"  JSON 백업: {args.json_path}")
-    return 1 if (report.stopped_reason or any(report.errors_by_source.values())) else 0
+    # "ok"/"partial" 판정은 pipeline.collect() 한 곳에서만 계산한다(단일 출처) —
+    # CLI 는 그 결과(report.status)를 그대로 exit code 로 옮길 뿐, 여기서
+    # stopped_reason/errors_by_source 를 다시 훑어 재계산하지 않는다.
+    return 0 if report.status == "ok" else 1
 
 
 def _run_trend(args):

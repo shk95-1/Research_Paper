@@ -263,6 +263,18 @@ class CollectOutputTest(unittest.TestCase):
         )
         self.assertEqual(exit_code, 1)
 
+    def test_exit_code_follows_report_status_rather_than_recomputing_it(self):
+        """partial/ok 판정은 pipeline.collect() 한 곳에서만 계산한다 — CLI 는
+        report.status 를 그대로 옮길 뿐, stopped_reason/errors_by_source 를
+        다시 훑어 재계산하지 않는다. status="partial" 인데 stopped_reason/
+        errors_by_source 가 비어 있어도(재계산했다면 0 이 됐을 상황) 여전히
+        exit 1 이어야 한다 — 판정의 단일 출처가 report.status 임을 증명한다."""
+        exit_code, _, _ = self._collect(
+            ["evidence", "collect", "--query", "cosmetic"],
+            report(status="partial"),  # stopped_reason={}, errors_by_source={}
+        )
+        self.assertEqual(exit_code, 1)
+
     def test_warns_when_no_contact_email_is_configured(self):
         self.enterContext(
             mock.patch.dict(

@@ -143,16 +143,28 @@ class Transport:
 
     def set_observer(
         self, observer: Callable[[Fetch, int | None, int, int, str | None], None] | None
-    ) -> None:
-        """observer 훅을 생성 후에 (재)설정한다.
+    ) -> Callable[[Fetch, int | None, int, int, str | None], None] | None:
+        """observer 훅을 생성 후에 (재)설정하고, "이전" observer 를 돌려준다.
 
         T5b 의 collect() 는 RunLog.start() 로 run_id 를 발급받은 "뒤"에야 그
         run_id 를 캡처하는 observer 콜백을 만들 수 있는데, Transport 자체는
         보통 그보다 먼저(호출자가 collect() 를 부르기 전에) 만들어진다. 그래서
         생성자의 observer= 만으로는 이 순서를 맞출 수 없어, 나중에 설정할 수
         있는 통로를 열어 둔다.
+
+        반환값이 이전 observer 인 이유: Transport 인스턴스가 재사용될 수
+        있다(예: 같은 CLI 프로세스가 collect() 를 두 번 부르거나, 호출자가
+        이미 자기 observer 를 걸어 둔 Transport 를 넘기는 경우). 호출자가
+        되돌려 줄 값 없이 그냥 None 으로 밀어버리면, collect() 가 끝난 뒤에도
+        원래 있던(또는 없던) observer 상태를 복원할 방법이 없어 다음
+        요청부터 죽은 run_id 로 fetch_log 가 계속 쌓이거나, 바깥 호출자가
+        걸어 둔 observer 가 조용히 사라진다. `previous =
+        transport.set_observer(new); ...; transport.set_observer(previous)`
+        패턴으로 안전하게 되돌릴 수 있어야 한다.
         """
+        previous = self._observer
         self._observer = observer
+        return previous
 
     def _notify(
         self, fetch: Fetch, status: int | None, attempt: int, elapsed_ms: int, error: str | None

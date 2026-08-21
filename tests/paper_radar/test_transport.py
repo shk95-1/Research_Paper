@@ -439,6 +439,36 @@ class ObserverTest(unittest.TestCase):
 
         self.assertEqual(calls, [(200, 0)])
 
+    def test_set_observer_returns_the_previous_observer_so_callers_can_restore_it(self):
+        """collect() 처럼 observer 를 임시로 갈아 끼우는 호출자는 끝난 뒤
+        원래 있던(또는 없던) observer 로 되돌려야 한다 — 그러려면 갈아 끼우는
+        시점에 이전 값을 돌려받아야 한다. None 강제 초기화는 바깥 호출자가
+        미리 걸어 둔 observer 를 지워버리므로 안전하지 않다."""
+        clock, sleep, _ = make_clock_and_sleep()
+        session = FakeSession([FakeResponse(200), FakeResponse(200)])
+        original_calls = []
+
+        def original(fetch, status, attempt, elapsed_ms, error):
+            original_calls.append(status)
+
+        transport = Transport(session=session, clock=clock, sleep=sleep, observer=original)
+
+        temporary_calls = []
+
+        def temporary_observer(fetch, status, attempt, elapsed_ms, error):
+            temporary_calls.append(status)
+
+        previous = transport.set_observer(temporary_observer)
+        self.assertIs(previous, original)  # 갈아 끼우기 전에 있던 observer 를 돌려받는다
+        transport.request(Fetch(url="https://api.example.org/x"), DEFAULT_POLICY)
+        self.assertEqual(temporary_calls, [200])
+        self.assertEqual(original_calls, [])  # 임시 observer 로 교체된 동안은 안 불림
+
+        restored = transport.set_observer(previous)
+        self.assertIs(restored, temporary_observer)  # 이번엔 직전(임시) observer 를 돌려준다
+        transport.request(Fetch(url="https://api.example.org/x"), DEFAULT_POLICY)
+        self.assertEqual(original_calls, [200])  # 복원된 뒤에는 원래 observer 가 다시 불린다
+
     def test_set_observer_none_removes_a_previously_installed_hook(self):
         clock, sleep, _ = make_clock_and_sleep()
         session = FakeSession([FakeResponse(200), FakeResponse(200)])
