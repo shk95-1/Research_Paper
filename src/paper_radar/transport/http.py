@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import os
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 
@@ -119,14 +119,39 @@ class Transport:
     session/clock/sleep 을 전부 주입 가능하게 열어 둔 이유는 테스트가 실제
     네트워크와 실제 대기 없이 페이스·재시도·백오프를 검증할 수 있어야 하기
     때문이다 (FakeSession + fake clock/sleep).
+
+    observer: 매 시도(attempt)마다 정확히 1회 호출되는 관측 훅
+    (fetch, status, attempt, elapsed_ms, error_str) — status=None 은 전송
+    실패(연결 오류)를, error_str 은 그 경우의 예외 메시지를 나타낸다. T5b 가
+    이 훅으로 fetch_log 를 기록한다. observer 자신이 던진 예외는 삼키고 warn
+    한 줄만 남긴다 — 관측 코드의 버그가 수집 자체를 죽여서는 안 되기 때문이다.
     """
 
-    def __init__(self, session=None, clock=time.monotonic, sleep=time.sleep):
+    def __init__(
+        self,
+        session=None,
+        clock=time.monotonic,
+        sleep=time.sleep,
+        observer: Callable[[Fetch, int | None, int, int, str | None], None] | None = None,
+    ):
         self._session = session if session is not None else requests.Session()
         self._clock = clock
         self._sleep = sleep
+        self._observer = observer
         self._last_call: dict[str, float] = {}  # host -> 마지막 호출 시각(clock 단위)
         self.budget = BudgetTracker()  # host 별 예산 추적. 이 인스턴스가 소유한다
+
+    def _notify(
+        self, fetch: Fetch, status: int | None, attempt: int, elapsed_ms: int, error: str | None
+    ) -> None:
+        """observer 훅을 호출한다. observer 가 예외를 던져도 삼키고 warn 한 줄만
+        남긴다 — 관측(로깅 등)의 버그 때문에 수집 전체가 죽으면 안 된다."""
+        if self._observer is None:
+            return
+        try:
+            self._observer(fetch, status, attempt, elapsed_ms, error)
+        except Exception as exc:
+            warn(f"observer 콜백 실패, 무시하고 계속한다: {exc}")
 
     def _user_agent(self) -> str:
         email = os.environ.get("OPENALEX_EMAIL", "").strip()
@@ -181,6 +206,8 @@ class Transport:
                     timeout=policy.timeout_s,
                 )
             except requests.RequestException as exc:
+                elapsed_ms = int((self._clock() - start) * 1000)
+                self._notify(fetch, None, attempt, elapsed_ms, str(exc))
                 warn(f"{host}: 요청 실패 ({exc})")
                 if attempt + 1 >= policy.max_attempts:
                     raise TransientError(f"{host}: 연결 실패, 재시도 소진 ({exc})") from exc
@@ -190,6 +217,7 @@ class Transport:
             elapsed_ms = int((self._clock() - start) * 1000)
             self.budget.observe(host, response.headers)
             status = response.status_code
+            self._notify(fetch, status, attempt, elapsed_ms, None)
 
             if status == 200:
                 return Payload(

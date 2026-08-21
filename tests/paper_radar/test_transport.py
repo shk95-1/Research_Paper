@@ -349,6 +349,92 @@ class AuthInjectionTest(unittest.TestCase):
         self.assertNotIn("api_key", session.calls[0]["params"])
 
 
+class ObserverTest(unittest.TestCase):
+    """Transport(observer=...) 훅 — T5b 가 fetch_log 를 기록하는 데 쓴다."""
+
+    def test_calls_observer_once_on_a_single_successful_attempt(self):
+        clock, sleep, _ = make_clock_and_sleep()
+        session = FakeSession([FakeResponse(200)])
+        calls = []
+        transport = Transport(
+            session=session,
+            clock=clock,
+            sleep=sleep,
+            observer=lambda fetch, status, attempt, elapsed_ms, error: calls.append(
+                (status, attempt, error)
+            ),
+        )
+
+        transport.request(Fetch(url="https://api.example.org/x"), DEFAULT_POLICY)
+
+        self.assertEqual(calls, [(200, 0, None)])
+
+    def test_calls_observer_once_per_attempt_on_retry(self):
+        """재시도가 있으면(429 -> 200) 시도마다 정확히 1회씩, 총 2회 불려야 한다."""
+        clock, sleep, _ = make_clock_and_sleep()
+        session = FakeSession([FakeResponse(429), FakeResponse(200)])
+        calls = []
+        transport = Transport(
+            session=session,
+            clock=clock,
+            sleep=sleep,
+            observer=lambda fetch, status, attempt, elapsed_ms, error: calls.append(
+                (status, attempt, error)
+            ),
+        )
+
+        transport.request(Fetch(url="https://api.example.org/x"), DEFAULT_POLICY)
+
+        self.assertEqual(calls, [(429, 0, None), (200, 1, None)])
+
+    def test_passes_none_status_and_the_error_text_on_a_connection_failure(self):
+        """전송 자체가 실패하면 status=None, error_str 에 예외 메시지가 담겨야 한다."""
+        clock, sleep, _ = make_clock_and_sleep()
+        session = FakeSession([requests.ConnectionError("연결 끊김"), FakeResponse(200)])
+        calls = []
+        transport = Transport(
+            session=session,
+            clock=clock,
+            sleep=sleep,
+            observer=lambda fetch, status, attempt, elapsed_ms, error: calls.append(
+                (status, attempt, error)
+            ),
+        )
+
+        transport.request(Fetch(url="https://api.example.org/x"), DEFAULT_POLICY)
+
+        self.assertEqual(calls[0][0], None)
+        self.assertEqual(calls[0][1], 0)
+        self.assertIn("연결 끊김", calls[0][2])
+        self.assertEqual(calls[1], (200, 1, None))
+
+    def test_observer_exception_does_not_affect_the_request_result(self):
+        """observer 자신이 던진 예외는 삼켜야 한다 — 관측 코드의 버그가 수집
+        결과에 영향을 주면 안 된다."""
+        clock, sleep, _ = make_clock_and_sleep()
+        session = FakeSession([FakeResponse(200, body=b'{"ok": true}')])
+
+        def bad_observer(fetch, status, attempt, elapsed_ms, error):
+            raise RuntimeError("observer 고장")
+
+        transport = Transport(session=session, clock=clock, sleep=sleep, observer=bad_observer)
+
+        payload = transport.request(Fetch(url="https://api.example.org/x"), DEFAULT_POLICY)
+
+        self.assertEqual(payload.status, 200)
+        self.assertEqual(payload.json_data(), {"ok": True})
+
+    def test_no_observer_means_no_crash(self):
+        """observer=None(기본값)이면 그냥 아무 일도 하지 않아야 한다."""
+        clock, sleep, _ = make_clock_and_sleep()
+        session = FakeSession([FakeResponse(200)])
+        transport = Transport(session=session, clock=clock, sleep=sleep)
+
+        payload = transport.request(Fetch(url="https://api.example.org/x"), DEFAULT_POLICY)
+
+        self.assertEqual(payload.status, 200)
+
+
 class CapturedAtTest(unittest.TestCase):
     def test_captured_at_is_stamped_by_transport_not_the_caller(self):
         fixed_now = datetime(2026, 8, 21, 12, 0, 0, tzinfo=UTC)
