@@ -68,6 +68,7 @@ from paper_radar.trend import aggregate as trend_aggregate
 from paper_radar.trend import collect as trend_collect
 from paper_radar.trend import normalize as trend_normalize
 from paper_radar.trend import records as trend_records
+from paper_radar.trend import suggest as trend_suggest
 from paper_radar.trend import unmatched as trend_unmatched
 from paper_radar.trials import collect as trials_collect
 
@@ -179,6 +180,17 @@ def parse_args(argv):
     t_unmatched.add_argument("--top", type=int, default=200, help="CSV 에 담을 상한. 0 이면 전부")
     t_unmatched.add_argument("--show", type=int, default=25, help="화면에 출력할 개수")
     t_unmatched.add_argument("--out", default=None)
+
+    # suggest: T14 — unmatched 미매칭 표현을 ingredient 테이블(PubChem+CosIng,
+    # T12·T13)의 name_key/inci_name/synonym 과 정확 일치로 대조해 사전 확장
+    # 후보를 제안한다. 로컬 전용(네트워크 없음, 새 소스 없음) — trials list/
+    # ingredient show 와 같은 부류라 --db 를 받는다.
+    t_suggest = trend_sub.add_parser(
+        "suggest", help="unmatched 표현에 PubChem/CosIng 동의어 후보를 제안한다 (로컬 전용)"
+    )
+    t_suggest.add_argument("--profile", required=True)
+    t_suggest.add_argument("--db", default=DEFAULT_DB, help=argparse.SUPPRESS)
+    t_suggest.add_argument("--out", default=None, help="출력 베이스 디렉터리 (생략 시 out/trend/)")
 
     # trials: ClinicalTrials.gov v2(T11). papers/trend 어느 쪽과도 무관한
     # 독립 테이블(trial)이라 별도 최상위 그룹으로 둔다.
@@ -501,6 +513,30 @@ def _run_trend_unmatched(args):
     return 0
 
 
+def _run_trend_suggest(args):
+    """`paper-radar trend suggest` — trend.suggest.run() 호출 -> 출력.
+
+    실제 대조·CSV 생성은 trend.suggest.run() 이 한다. ingredient 테이블이
+    비어 있으면(resolve/import-cosing 을 아직 안 돌린 경우) 오류가 아니라
+    안내만 하고 exit 0(브리핑 지시) — 빈 파일도 만들지 않는다.
+    """
+    result = trend_suggest.run(args.profile, args.db, out_dir=args.out or trend_suggest.OUT_DIR)
+    if result["ingredient_table_empty"]:
+        print(
+            "ingredient 테이블이 비어 있습니다 — paper-radar ingredient resolve /"
+            " import-cosing 을 먼저 실행하세요"
+        )
+        return 0
+
+    print(
+        f"[{args.profile}] unmatched {result['reviewed']:,}행 검토, "
+        f"제안 {result['suggested']:,}건"
+    )
+    print(f"  -> {result['target']}")
+    print("  verdict 컬럼을 사람이 채운다 — 제안은 결정이 아니다\n")
+    return 0
+
+
 def _run_trials_collect(args):
     print(f"검색: {args.query!r}  상한: {args.limit}건")
 
@@ -630,6 +666,7 @@ TREND_COMMANDS = {
     "normalize": _run_trend_normalize,
     "aggregate": _run_trend_aggregate,
     "unmatched": _run_trend_unmatched,
+    "suggest": _run_trend_suggest,
 }
 TRIALS_COMMANDS = {"collect": _run_trials_collect, "list": _run_trials_list}
 INGREDIENT_COMMANDS = {

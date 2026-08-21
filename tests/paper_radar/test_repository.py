@@ -990,5 +990,36 @@ class GetIngredientTest(unittest.TestCase):
         self.assertIsNone(repository.get_ingredient(self.conn, "unknown-ingredient"))
 
 
+class ListIngredientsTest(unittest.TestCase):
+    """repository.list_ingredients() — T14 의 trend.suggest.run() 이 unmatched
+    검수용 동의어 후보를 만들 때 ingredient 테이블 전체를 훑는 데 쓴다."""
+
+    def setUp(self):
+        handle, self.path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        os.unlink(self.path)
+        self.conn = repository.connect(self.path)
+        self.addCleanup(self._cleanup)
+
+    def _cleanup(self):
+        self.conn.close()
+        if os.path.exists(self.path):
+            os.unlink(self.path)
+
+    def test_returns_an_empty_list_when_the_table_has_no_rows(self):
+        self.assertEqual(repository.list_ingredients(self.conn), [])
+
+    def test_returns_every_stored_row_ordered_by_name_key(self):
+        repository.upsert_records(
+            self.conn,
+            [
+                ingredient_record(name_key="zinc oxide"),
+                ingredient_record(name_key="ascorbic acid"),
+            ],
+        )
+        got = repository.list_ingredients(self.conn)
+        self.assertEqual([r.name_key for r in got], ["ascorbic acid", "zinc oxide"])
+
+
 if __name__ == "__main__":
     unittest.main()

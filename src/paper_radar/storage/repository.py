@@ -588,3 +588,16 @@ def get_ingredient(conn: sqlite3.Connection, name_key: str) -> IngredientRecord 
         "SELECT * FROM ingredient WHERE name_key = ?", (name_key,)
     ).fetchone()
     return _ingredient_from_row(row) if row is not None else None
+
+
+def list_ingredients(conn: sqlite3.Connection) -> list[IngredientRecord]:
+    """ingredient 테이블 전체를 name_key 순으로 읽는다.
+
+    get_ingredient() 은 단일 name_key 조회만 지원한다 — T14 의
+    trend.suggest.run() 은 unmatched 표현을 ingredient 테이블 전체(PubChem+
+    CosIng)와 대조해야 해서 전수 스캔이 필요하다. 테이블이 비어 있으면 빈
+    리스트를 돌려준다(오류가 아니다 — 호출자가 "아직 resolve/import-cosing
+    을 안 돌렸다"는 안내로 쓴다).
+    """
+    rows = conn.execute("SELECT * FROM ingredient ORDER BY name_key").fetchall()
+    return [_ingredient_from_row(row) for row in rows]

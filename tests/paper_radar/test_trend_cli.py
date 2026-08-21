@@ -8,15 +8,20 @@
 from __future__ import annotations
 
 import contextlib
+import csv
 import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from paper_radar import cli
+from paper_radar.models import IngredientRecord
+from paper_radar.storage import repository
 from paper_radar.trend import records as trend_records
+from paper_radar.trend import unmatched as trend_unmatched
 
 FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "trend_synthetic"
 
@@ -49,6 +54,10 @@ class TrendParseArgsTest(unittest.TestCase):
     def test_no_command_under_trend_exits_with_usage(self):
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
             cli.parse_args(["trend"])
+
+    def test_suggest_requires_a_profile(self):
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            cli.parse_args(["trend", "suggest"])
 
 
 class _FixtureCase(unittest.TestCase):
@@ -134,6 +143,100 @@ class TrendUnmatchedOutputTest(_FixtureCase):
                 )
         self.assertEqual(exit_code, 0)
         self.assertIn("cactus extract complex", output.getvalue())
+
+
+def _unmatched_row(**overrides):
+    base = {
+        "rank": "1",
+        "term": "niacinamide",
+        "paper_count": "5",
+        "first_seen_month": "2024-01",
+        "last_seen_month": "2024-03",
+        "months_present": "2",
+        "example_title_1": "",
+        "example_title_2": "",
+        "example_title_3": "",
+        "verdict": "",
+    }
+    base.update(overrides)
+    return base
+
+
+class TrendSuggestOutputTest(unittest.TestCase):
+    """`trend suggest` — T14, 로컬 전용(네트워크 없음). 실제 SQLite DB + 실제
+    unmatched CSV 픽스처로 end-to-end(모킹 없음, ingredient show/import-cosing
+    CLI 테스트와 같은 방식)."""
+
+    def setUp(self):
+        handle, self.db_path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        os.unlink(self.db_path)
+        self.addCleanup(lambda: os.path.exists(self.db_path) and os.unlink(self.db_path))
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp_dir.cleanup)
+
+    def _write_unmatched_csv(self, profile, rows):
+        path = trend_unmatched.default_path(profile, "keywords_norm", out_dir=self.tmp_dir.name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=trend_unmatched.FIELDS)
+            writer.writeheader()
+            writer.writerows(rows)
+
+    def _suggest(self, profile):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            exit_code = cli.run(
+                cli.parse_args(
+                    [
+                        "trend",
+                        "suggest",
+                        "--profile",
+                        profile,
+                        "--db",
+                        self.db_path,
+                        "--out",
+                        self.tmp_dir.name,
+                    ]
+                )
+            )
+        return exit_code, output.getvalue()
+
+    def test_prints_the_review_and_suggestion_counts_and_writes_the_csv(self):
+        self._write_unmatched_csv("sunscreen", [_unmatched_row(term="niacinamide")])
+        conn = repository.connect(self.db_path)
+        repository.upsert_records(
+            conn,
+            [
+                IngredientRecord(
+                    name_key="niacinamide",
+                    inci_name="Niacinamide",
+                    cid=936,
+                    cas="98-92-0",
+                    synonyms=(),
+                    sources=("pubchem",),
+                    fetched_at="2026-08-21T00:00:00Z",
+                )
+            ],
+        )
+        conn.close()
+
+        exit_code, text = self._suggest("sunscreen")
+        self.assertEqual(exit_code, 0)
+        self.assertIn("검토", text)
+        self.assertIn("제안 1건", text)
+        target = Path(self.tmp_dir.name) / "sunscreen" / "lexicon_suggestions.csv"
+        self.assertTrue(target.exists())
+
+    def test_reports_an_empty_ingredient_table_without_writing_a_file(self):
+        self._write_unmatched_csv("sunscreen", [_unmatched_row(term="niacinamide")])
+        repository.connect(self.db_path).close()  # DB 는 있지만 ingredient 행이 없다.
+
+        exit_code, text = self._suggest("sunscreen")
+        self.assertEqual(exit_code, 0)
+        self.assertIn("ingredient 테이블이 비어 있습니다", text)
+        target = Path(self.tmp_dir.name) / "sunscreen" / "lexicon_suggestions.csv"
+        self.assertFalse(target.exists())
 
 
 class TrendCollectOutputTest(unittest.TestCase):
