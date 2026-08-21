@@ -27,7 +27,7 @@ PAYLOAD = {
     }
 }
 
-RECORD_KEYS = {"title", "journal", "publisher", "type", "year"}
+RECORD_KEYS = {"title", "journal", "publisher", "type", "year", "retractions"}
 
 
 class FetchTest(unittest.TestCase):
@@ -91,6 +91,27 @@ class FetchTest(unittest.TestCase):
         self.assertIsNone(result["title"])
         self.assertIsNone(result["journal"])
         self.assertIsNone(result["year"])
+        self.assertEqual(result["retractions"], ())
+
+    def test_a_non_retracted_paper_reports_no_retractions(self):
+        result, _ = self._fetch(PAYLOAD, doi="10.1016/j.yrtph.2017.05.017")
+        self.assertEqual(result["retractions"], ())
+
+    def test_carries_the_retraction_relation_into_the_fetched_record(self):
+        payload = {
+            "message": {
+                "DOI": "10.1234/abc",
+                "relation": {
+                    "is-retracted-by": [{"id": "10.1234/retraction.abc", "id-type": "doi"}]
+                },
+            }
+        }
+        result, _ = self._fetch(payload, doi="10.1234/abc")
+        self.assertEqual(
+            result["retractions"],
+            ({"retraction_doi": "10.1234/retraction.abc", "update_type": "retraction",
+              "update_date": None},),
+        )
 
     def test_survives_an_empty_title_list(self):
         result, _ = self._fetch({"message": {"title": []}}, doi="10.1/a")
@@ -108,6 +129,93 @@ class FetchTest(unittest.TestCase):
         """T5b 의 동등성 전제 — 반환 dict 키가 papers/sources/crossref.py 와 같아야 한다."""
         result, _ = self._fetch(PAYLOAD, doi="10.1/a")
         self.assertEqual(set(result), RECORD_KEYS)
+
+
+class ParseRetractionsTest(unittest.TestCase):
+    """crossref.parse_retractions: 순수 함수 — 두 철회 신호 경로 파싱.
+
+    브리핑의 구성 예시(relation 경로)와 API 사실(update-to 경로)을 그대로
+    쓴다. 네트워크·DB 를 전혀 만지지 않으므로 Transport/FakeSession 없이
+    message dict 를 직접 준다.
+    """
+
+    def test_extracts_the_relation_path_for_the_retracted_paper_itself(self):
+        message = {
+            "DOI": "10.1234/abc",
+            "relation": {
+                "is-retracted-by": [{"id": "10.1234/retraction.abc", "id-type": "doi"}]
+            },
+        }
+        result = crossref.parse_retractions(message, "10.1234/abc")
+        self.assertEqual(
+            result,
+            (
+                {
+                    "retraction_doi": "10.1234/retraction.abc",
+                    "update_type": "retraction",
+                    "update_date": None,
+                },
+            ),
+        )
+
+    def test_extracts_the_update_to_path_for_the_retraction_notice_itself(self):
+        message = {
+            "DOI": "10.1234/retraction.abc",
+            "update-to": [
+                {
+                    "DOI": "10.1234/abc",
+                    "type": "retraction",
+                    "updated": {"date-parts": [[2024, 3, 15]]},
+                }
+            ],
+        }
+        result = crossref.parse_retractions(message, "10.1234/retraction.abc")
+        self.assertEqual(
+            result,
+            (
+                {
+                    "retraction_doi": "10.1234/abc",
+                    "update_type": "retraction",
+                    "update_date": "2024-03-15",
+                },
+            ),
+        )
+
+    def test_returns_an_empty_tuple_when_neither_path_is_present(self):
+        self.assertEqual(crossref.parse_retractions({"DOI": "10.1/a"}, "10.1/a"), ())
+        self.assertEqual(crossref.parse_retractions({}, "10.1/a"), ())
+
+    def test_ignores_update_to_entries_that_are_not_retractions(self):
+        """correction 은 이번 범위 밖이다 — 정정 논문 추적은 별도 태스크의 몫."""
+        message = {
+            "DOI": "10.1234/notice",
+            "update-to": [
+                {"DOI": "10.1234/abc", "type": "correction", "updated": {"date-parts": [[2024]]}}
+            ],
+        }
+        self.assertEqual(crossref.parse_retractions(message, "10.1234/notice"), ())
+
+    def test_handles_date_parts_missing_month_and_day(self):
+        message = {
+            "DOI": "10.1234/notice",
+            "update-to": [
+                {"DOI": "10.1234/abc", "type": "retraction", "updated": {"date-parts": [[2024]]}}
+            ],
+        }
+        result = crossref.parse_retractions(message, "10.1234/notice")
+        self.assertEqual(result[0]["update_date"], "2024")
+
+    def test_ignores_an_item_whose_doi_matches_its_own_message_doi(self):
+        """자기 자신을 자기 철회 공지로 지목하는 모순된 응답을 방어적으로 거른다."""
+        message = {
+            "DOI": "10.1234/abc",
+            "relation": {"is-retracted-by": [{"id": "10.1234/abc", "id-type": "doi"}]},
+        }
+        self.assertEqual(crossref.parse_retractions(message, "10.1234/abc"), ())
+
+    def test_returns_an_empty_tuple_for_a_non_dict_message(self):
+        self.assertEqual(crossref.parse_retractions(None, "10.1/a"), ())
+        self.assertEqual(crossref.parse_retractions("unexpected", "10.1/a"), ())
 
 
 class RegistryTest(unittest.TestCase):

@@ -60,11 +60,84 @@ def _year(issued):
     return year if isinstance(year, int) else None
 
 
+def _update_date(updated):
+    """"updated": {"date-parts": [[Y, (M), (D)]]} 를 "YYYY[-MM[-DD]]" 로.
+
+    실측에서 월/일이 없는(연도만 있는) date-parts 가 드물지 않다 — 있는
+    만큼만 이어 붙인다. 파츠가 아예 없으면 None(날짜 미상).
+    """
+    parts = ((updated or {}).get("date-parts") or [None])[0]
+    if not isinstance(parts, list) or not parts:
+        return None
+    numbers = [p for p in parts if isinstance(p, int)]
+    if not numbers:
+        return None
+    widths = (4, 2, 2)  # 연-월-일 자리수(월/일은 zero-pad)
+    return "-".join(f"{value:0{width}d}" for value, width in zip(numbers, widths, strict=False))
+
+
+def parse_retractions(message: dict, doi: str) -> tuple[dict, ...]:
+    """message 에서 철회 신호를 두 경로로 뽑는다. 순수 함수(네트워크·DB 없음).
+
+    경로 1 (relation): 철회'된' 논문 자신의 응답에 실린다 —
+        relation["is-retracted-by"][].id 가 철회 공지의 DOI다. 우리 파이프라인이
+        조회하는 DOI 는 거의 항상 이쪽(원 논문)이라 이게 주 경로다.
+    경로 2 (update-to): 철회 공지 자신의 응답에 실린다 — update-to[].DOI 가
+        원 논문의 DOI 다. 우리가 공지 DOI 자체를 수집하는 경우는 드물지만
+        파싱은 해둔다. type 에 "retraction" 이 포함된 항목만 쓴다 —
+        correction 등 다른 갱신 종류는 이번 태스크(철회 추적)의 범위 밖이라
+        무시한다(정정 논문 추적은 별도 태스크의 몫).
+
+    doi(이 message 의 주인 DOI, 즉 fetch() 호출에 쓰인 DOI)와 우연히 같은
+    DOI 를 가리키는 항목은 자기 자신을 자기 철회 공지로 지목하는 모순이라
+    방어적으로 걸러낸다(API 오응답 방어) — 반환 dict 자체는 "doi" 를 담지
+    않는다(그 값은 pipeline 이 record["doi"] 로 채운다).
+    """
+    if not isinstance(message, dict):
+        return ()
+    own = (doi or "").strip().lower()
+    results: list[dict] = []
+
+    relation = message.get("relation")
+    if isinstance(relation, dict):
+        for item in relation.get("is-retracted-by") or []:
+            if not isinstance(item, dict):
+                continue
+            candidate = item.get("id")
+            if not candidate or candidate.strip().lower() == own:
+                continue
+            results.append(
+                {"retraction_doi": candidate, "update_type": "retraction", "update_date": None}
+            )
+
+    for item in message.get("update-to") or []:
+        if not isinstance(item, dict):
+            continue
+        update_type = item.get("type") or ""
+        if "retraction" not in update_type:
+            continue
+        candidate = item.get("DOI")
+        if candidate and candidate.strip().lower() == own:
+            continue
+        results.append(
+            {
+                "retraction_doi": candidate,
+                "update_type": update_type,
+                "update_date": _update_date(item.get("updated")),
+            }
+        )
+
+    return tuple(results)
+
+
 def fetch(transport, doi=None, title=None):
     """DOI 로만 조회한다. DOI 가 없으면 None(조회 자체가 불가능하다는 뜻).
 
     404(NotFound)는 여기서 잡지 않고 그대로 전파한다 — 그 판단은 파이프라인
     몫이다. title 은 이 소스에서는 쓰이지 않는다(브리핑 시그니처와의 호환용).
+
+    retractions(T9): parse_retractions() 로 뽑은 철회 신호 튜플. 비어 있는
+    것(기본값)이 대다수다 — 철회는 극소수 논문에만 해당한다.
     """
     if not doi:
         return None
@@ -78,4 +151,5 @@ def fetch(transport, doi=None, title=None):
         "publisher": message.get("publisher") or None,
         "type": message.get("type") or None,
         "year": _year(message.get("issued")),
+        "retractions": parse_retractions(message, doi),
     }

@@ -35,7 +35,7 @@ import sqlite3
 from collections.abc import Iterable
 from dataclasses import fields
 
-from paper_radar.models import OaLocationRecord
+from paper_radar.models import OaLocationRecord, RetractionRecord
 from paper_radar.storage.schema import migrate
 
 # dataclass 레코드 타입 -> (테이블명, 병합정책). "overwrite" = 자연키 충돌 시
@@ -45,6 +45,7 @@ from paper_radar.storage.schema import migrate
 # 태스크는 여기 항목 하나만 더하면 upsert_records() 가 자동으로 처리한다.
 TABLE_FOR: dict[type, tuple[str, str]] = {
     OaLocationRecord: ("oa_location", "overwrite"),
+    RetractionRecord: ("retraction", "overwrite"),
 }
 
 # 스펙 8절 레코드 스키마 + is_retracted(버그 수정, 아래 public_record 참고).
@@ -376,6 +377,13 @@ def upsert_records(conn: sqlite3.Connection, records: Iterable) -> int:
     반환값은 upsert 한 레코드 수(records 를 소비한 개수, 실패 없이 전부
     처리했다는 전제 — 실패하면 예외가 그대로 전파되고 그때까지 처리한 것도
     commit 되지 않는다).
+
+    자연키 컬럼이 None 이면 저장 전에 '' 로 강제한다(T9, RetractionRecord.
+    retraction_doi 가 첫 사례) — SQLite 는 PK(및 그걸 구성하는 컬럼)에도
+    역사적으로 NULL 을 허용하고, NULL 은 자기 자신과도 "다르다"고 비교되어
+    PK/UNIQUE 제약이 NULL 값의 중복을 걸러내지 못한다. 그대로 두면 "공지
+    DOI 미상"인 행을 여러 번 upsert 할 때마다 자연키 충돌 없이 새 행이
+    조용히 계속 쌓인다.
     """
     count = 0
     for record in records:
@@ -394,8 +402,11 @@ def upsert_records(conn: sqlite3.Connection, records: Iterable) -> int:
             raise ValueError(f"upsert_records: 알 수 없는 병합 정책 {policy!r} ({table})")
 
         row = _record_row(record)
-        columns = list(row)
         natural_key = record_type.NATURAL_KEY
+        for column in natural_key:
+            if row.get(column) is None:
+                row[column] = ""
+        columns = list(row)
         names = ", ".join(columns)
         placeholders = ", ".join(":" + name for name in columns)
         conflict_columns = ", ".join(natural_key)

@@ -90,6 +90,20 @@ CROSSREF_PAYLOAD = {
     }
 }
 
+# T9 — WORK 의 doi("10.1/a")가 철회됐다고 Crossref 가 보고하는 응답. relation
+# 경로(철회된 논문 자신의 응답)를 쓴다.
+CROSSREF_PAYLOAD_RETRACTED = {
+    "message": {
+        "DOI": "10.1/a",
+        "title": ["Retinol and the skin barrier"],
+        "container-title": ["Journal of Cosmetic Science"],
+        "publisher": "Elsevier BV",
+        "type": "journal-article",
+        "issued": {"date-parts": [[2024]]},
+        "relation": {"is-retracted-by": [{"id": "10.1/notice", "id-type": "doi"}]},
+    }
+}
+
 # unpaywall — WORK 의 doi("10.1/a")에 대한 응답. collect() 는 papers 저장이
 # 끝난 뒤 별도 단계로 이걸 조회한다(evidence/verify 에는 들어가지 않는다).
 UNPAYWALL_PAYLOAD = {
@@ -323,6 +337,39 @@ class EnrichTest(_DbTestCase):
         evidence = result["verification"]["evidence"]
         self.assertEqual(set(evidence), {"semantic_scholar", "europepmc", "crossref"})
         self.assertEqual(evidence["crossref"]["title"], "Retinol and the skin barrier")
+
+    def test_stores_a_retraction_row_and_marks_the_record_retracted_when_crossref_flags_one(self):
+        """T9: crossref 의 retractions 신호가 (a) retraction 테이블에 저장되고
+        (b) verify.build() 의 교차 검증을 거쳐 is_retracted/점수 0 에 반영돼야
+        한다 — 두 표면 모두 확인한다."""
+        result, _ = self._enrich(
+            responses=[
+                _json_response(S2_PAYLOAD),
+                _json_response(EPMC_PAYLOAD),
+                _json_response(CROSSREF_PAYLOAD_RETRACTED),
+            ]
+        )
+        self.assertTrue(result["verification"]["is_retracted"])
+        self.assertEqual(result["verification"]["confidence_score"], 0)
+
+        row = self.conn.execute("SELECT * FROM retraction WHERE doi = '10.1/a'").fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row["retraction_doi"], "10.1/notice")
+        self.assertEqual(row["update_type"], "retraction")
+        self.assertIsNone(row["update_date"])
+        self.assertEqual(row["source"], "crossref")
+
+    def test_does_not_write_a_retraction_row_when_crossref_reports_none(self):
+        result, _ = self._enrich(
+            responses=[
+                _json_response(S2_PAYLOAD),
+                _json_response(EPMC_PAYLOAD),
+                _json_response(CROSSREF_PAYLOAD),
+            ]
+        )
+        self.assertFalse(result["verification"]["is_retracted"])
+        count = self.conn.execute("SELECT COUNT(*) FROM retraction").fetchone()[0]
+        self.assertEqual(count, 0)
 
     def test_marks_crossref_as_unverified_when_the_doi_is_unknown(self):
         with quiet():
@@ -587,6 +634,38 @@ class CollectTest(_DbTestCase):
         evidence = report.records[0]["verification"]["evidence"]
         self.assertNotIn("unpaywall", evidence)
         self.assertNotIn("unpaywall", report.records[0]["verification"]["found_in_sources"])
+
+    def test_a_crossref_retraction_is_reflected_in_the_retraction_table_and_papers_is_retracted(
+        self,
+    ):
+        """T9: collect() 전체 흐름에서 crossref 철회 신호가 (a) retraction
+        테이블 행과 (b) papers.is_retracted(및 raw 안의 verification) 양쪽에
+        반영돼야 한다."""
+        responses = [
+            _search_page([WORK]),
+            _json_response(S2_PAYLOAD),
+            _json_response(EPMC_PAYLOAD),
+            _json_response(CROSSREF_PAYLOAD_RETRACTED),
+            _json_response(UNPAYWALL_PAYLOAD),
+        ]
+        transport, _ = self._transport(responses)
+
+        report = pipeline.collect(self.conn, transport, "cosmetic", 2016, 2026, 10)
+
+        self.assertTrue(report.records[0]["is_retracted"])
+        self.assertEqual(report.records[0]["verification"]["confidence_score"], 0)
+
+        papers_row = self.conn.execute(
+            "SELECT is_retracted FROM papers WHERE doi = '10.1/a'"
+        ).fetchone()
+        self.assertEqual(papers_row["is_retracted"], 1)
+
+        retraction_row = self.conn.execute(
+            "SELECT * FROM retraction WHERE doi = '10.1/a'"
+        ).fetchone()
+        self.assertIsNotNone(retraction_row)
+        self.assertEqual(retraction_row["retraction_doi"], "10.1/notice")
+        self.assertEqual(retraction_row["source"], "crossref")
 
     def test_returns_no_records_when_the_search_finds_nothing(self):
         transport, _ = self._transport([_search_page([])])

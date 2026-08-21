@@ -83,7 +83,12 @@ def build(record, found_in_sources=None, evidence=None):
         else 0.0
     )
     title_match = similarity >= TITLE_MATCH_THRESHOLD
-    is_retracted = bool(record.get("is_retracted"))
+    # 교차 검증(T9): OpenAlex 의 is_retracted 와 Crossref 의 retractions(fetch()
+    # 가 evidence["crossref"] 안에 이미 실어 온 것) 어느 쪽이든 철회를 가리키면
+    # 철회로 판정한다 — 한쪽 소스가 반영을 놓쳐도(예: OpenAlex 색인 지연) 다른
+    # 쪽이 잡아낸다. evidence/verification 표면은 이 판정에 새 키를 더하지
+    # 않는다(retractions 는 이미 evidence["crossref"] 안에 있다).
+    is_retracted = bool(record.get("is_retracted")) or bool(crossref_evidence.get("retractions"))
 
     extra_sources = [name for name in sources if name != PRIMARY_SOURCE]
     score = SCORE_BASE

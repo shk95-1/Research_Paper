@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import ClassVar
 from unittest import mock
 
-from paper_radar.models import OaLocationRecord
+from paper_radar.models import OaLocationRecord, RetractionRecord
 from paper_radar.storage import repository, runlog
 
 
@@ -492,6 +492,95 @@ class UpsertRecordsTest(unittest.TestCase):
 
     def test_returns_zero_for_an_empty_iterable(self):
         self.assertEqual(repository.upsert_records(self.conn, []), 0)
+
+
+def retraction_record(**overrides):
+    base = {
+        "doi": "10.1/retracted",
+        "retraction_doi": "10.1/notice",
+        "update_type": "retraction",
+        "update_date": "2024-03-15",
+        "source": "crossref",
+    }
+    base.update(overrides)
+    return RetractionRecord(**base)
+
+
+class RetractionRecordUpsertTest(unittest.TestCase):
+    """T9: RetractionRecord 를 retraction 테이블에 저장. retraction_doi 가
+    None 이면 저장 전에 '' 로 강제되어야 한다(PK NULL 특례 방어 — 자세한
+    이유는 repository.upsert_records() docstring 참고)."""
+
+    def setUp(self):
+        handle, self.path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        os.unlink(self.path)
+        self.conn = repository.connect(self.path)
+        self.addCleanup(self._cleanup)
+
+    def _cleanup(self):
+        self.conn.close()
+        if os.path.exists(self.path):
+            os.unlink(self.path)
+
+    def test_inserts_a_new_retraction_row(self):
+        count = repository.upsert_records(self.conn, [retraction_record()])
+        self.assertEqual(count, 1)
+        row = self.conn.execute(
+            "SELECT * FROM retraction WHERE doi = '10.1/retracted'"
+        ).fetchone()
+        self.assertEqual(row["retraction_doi"], "10.1/notice")
+        self.assertEqual(row["update_type"], "retraction")
+        self.assertEqual(row["update_date"], "2024-03-15")
+        self.assertEqual(row["source"], "crossref")
+
+    def test_none_retraction_doi_is_coerced_to_an_empty_string_not_null(self):
+        repository.upsert_records(self.conn, [retraction_record(retraction_doi=None)])
+        row = self.conn.execute(
+            "SELECT retraction_doi FROM retraction WHERE doi = '10.1/retracted'"
+        ).fetchone()
+        self.assertEqual(row["retraction_doi"], "")
+        self.assertIsNotNone(row["retraction_doi"])
+
+    def test_repeated_upserts_with_a_none_retraction_doi_do_not_pile_up_duplicate_rows(self):
+        """SQLite 는 PK 컬럼의 NULL 도 서로 "다르다"고 보므로, 강제 coercion
+        없이는 (doi, NULL) 이 upsert 될 때마다 새 행이 쌓인다 — 이 테스트가
+        그 특례를 실제로 피해가는지 확인한다."""
+        repository.upsert_records(self.conn, [retraction_record(retraction_doi=None)])
+        repository.upsert_records(
+            self.conn, [retraction_record(retraction_doi=None, update_date="2024-04-01")]
+        )
+        count = self.conn.execute(
+            "SELECT COUNT(*) FROM retraction WHERE doi = '10.1/retracted'"
+        ).fetchone()[0]
+        self.assertEqual(count, 1, "같은 (doi, '') 자연키는 한 행으로 유지되어야 한다")
+        row = self.conn.execute(
+            "SELECT update_date FROM retraction WHERE doi = '10.1/retracted'"
+        ).fetchone()
+        self.assertEqual(row["update_date"], "2024-04-01", "overwrite 정책이 최신값으로 갱신")
+
+    def test_conflicting_natural_key_overwrites_rather_than_duplicates(self):
+        repository.upsert_records(self.conn, [retraction_record()])
+        repository.upsert_records(self.conn, [retraction_record(update_type="retraction-updated")])
+        count = self.conn.execute(
+            "SELECT COUNT(*) FROM retraction WHERE doi = '10.1/retracted'"
+        ).fetchone()[0]
+        self.assertEqual(count, 1)
+        row = self.conn.execute(
+            "SELECT update_type FROM retraction WHERE doi = '10.1/retracted'"
+        ).fetchone()
+        self.assertEqual(row["update_type"], "retraction-updated")
+
+    def test_a_different_retraction_doi_for_the_same_paper_is_a_separate_row(self):
+        """같은 논문이 서로 다른 철회 공지 DOI 를 두 번 관측할 수 있다(예:
+        공지 DOI 가 나중에 정정되는 경우) — (doi, retraction_doi) 복합키라
+        별도 행으로 남는다."""
+        repository.upsert_records(self.conn, [retraction_record(retraction_doi="10.1/notice-a")])
+        repository.upsert_records(self.conn, [retraction_record(retraction_doi="10.1/notice-b")])
+        count = self.conn.execute(
+            "SELECT COUNT(*) FROM retraction WHERE doi = '10.1/retracted'"
+        ).fetchone()[0]
+        self.assertEqual(count, 2)
 
 
 class OaPdfUrlsTest(unittest.TestCase):

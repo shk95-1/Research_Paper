@@ -57,7 +57,7 @@ from urllib.parse import urlsplit
 
 from paper_radar import registry
 from paper_radar.evidence import verify
-from paper_radar.models import OaLocationRecord
+from paper_radar.models import OaLocationRecord, RetractionRecord
 from paper_radar.sources import crossref, europepmc, openalex, semantic_scholar, unpaywall
 from paper_radar.storage import cache, repository
 from paper_radar.storage.runlog import RunLog
@@ -170,6 +170,15 @@ def enrich(conn, transport, record, error_counts=None):
     exc.source 에 실어(원래 예외에는 없는 속성이라 여기서 붙인다) 그대로
     collect() 까지 전파한다. collect() 는 이 신호로 보강 루프 전체를
     중단해야 하기 때문이다.
+
+    철회 추적(T9): crossref 응답에 실려 온 retractions(evidence["crossref"]
+    ["retractions"])가 비어 있지 않으면 RetractionRecord 로 변환해
+    repository.upsert_records() 로 retraction 테이블에 저장한다. 이건
+    Unpaywall(T8)의 OA 해소처럼 "완전히 별개 테이블"이면서 confidence_score
+    와 무관한 부가 정보가 아니다 — 오히려 verify.build() 의 is_retracted
+    입력(교차 검증)에 이미 반영되는 신호라서, 그 신호를 만드는 evidence 가
+    이미 갖춰진 이 자리(enrich() 안, verify.build() 호출 직전)에서 함께
+    저장하는 편이 "어디서 왔는지"와 "왜 저장했는지"가 한곳에 있어 자연스럽다.
     """
     if error_counts is None:
         error_counts = {}
@@ -206,6 +215,23 @@ def enrich(conn, transport, record, error_counts=None):
             _apply_fills(record, result, enricher.fills)
             if enricher.name != "crossref":
                 sources.append(enricher.name)
+
+    retractions = (evidence.get("crossref") or {}).get("retractions") or ()
+    if retractions:
+        doi = record.get("doi") or ""
+        repository.upsert_records(
+            conn,
+            [
+                RetractionRecord(
+                    doi=doi,
+                    retraction_doi=item.get("retraction_doi"),
+                    update_type=item.get("update_type") or "",
+                    update_date=item.get("update_date"),
+                    source="crossref",
+                )
+                for item in retractions
+            ],
+        )
 
     record["verification"] = verify.build(record, found_in_sources=sources, evidence=evidence)
     record["collected_at"] = _now()

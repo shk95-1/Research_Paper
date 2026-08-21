@@ -90,6 +90,7 @@ class MigrateOnAnEmptyDatabaseTest(unittest.TestCase):
                 "fetch_log",
                 "sqlite_sequence",
                 "oa_location",
+                "retraction",
             },
         )
 
@@ -113,6 +114,14 @@ class MigrateOnAnEmptyDatabaseTest(unittest.TestCase):
                 "license",
                 "checked_at",
             },
+        )
+
+    def test_migrate_creates_the_retraction_table(self):
+        schema.migrate(self.conn)
+        columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(retraction)")}
+        self.assertEqual(
+            columns,
+            {"doi", "retraction_doi", "update_type", "update_date", "source"},
         )
 
 

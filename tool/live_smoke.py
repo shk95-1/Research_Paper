@@ -30,6 +30,11 @@ from paper_radar.transport.http import Transport
 # 2016년 논문. 인용수가 많아 네 소스 모두에 색인되어 있다.
 KNOWN_DOI = "10.1016/j.yrtph.2017.05.017"
 
+# Wakefield 외(1998, Lancet) — MMR 백신-자폐 연관성을 주장한 논문으로, 2010년
+# 공식 철회됐다(가장 널리 알려진 철회 사례 중 하나라 드리프트 감지용으로
+# 안정적이다). T9(Crossref 철회 신호 파싱) 스모크용.
+KNOWN_RETRACTED_DOI = "10.1016/S0140-6736(97)11096-0"
+
 
 class LiveSmokeTest(unittest.TestCase):
     """실패하면 API 응답 형태가 바뀐 것이다. 픽스처를 갱신해야 한다."""
@@ -70,6 +75,14 @@ class LiveSmokeTest(unittest.TestCase):
         # 이 스모크가 계속 확인한다.
         with self.assertRaises(NotFound):
             crossref.fetch(self.transport, doi="10.9999/definitely-not-a-real-doi")
+
+    def test_crossref_still_reports_a_known_retraction(self):
+        # 이 DOI 는 실제로 철회됐다 — relation["is-retracted-by"] 경로가
+        # 여전히 이 형태로 오는지(파싱 로직의 드리프트 감지) 확인한다.
+        result = crossref.fetch(self.transport, doi=KNOWN_RETRACTED_DOI)
+        self.assertIsNotNone(result, "Crossref 조회가 실패했습니다")
+        self.assertTrue(result["retractions"], "알려진 철회 DOI인데 retractions 가 비었습니다")
+        self.assertEqual(result["retractions"][0]["update_type"], "retraction")
 
     def test_semantic_scholar_still_nests_tldr_text(self):
         try:

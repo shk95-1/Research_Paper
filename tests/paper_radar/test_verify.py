@@ -203,6 +203,65 @@ class BuildTest(unittest.TestCase):
         self.assertEqual(evidence, {"crossref": {"title": "Retinol and the skin barrier"}})
 
 
+class CrossrefRetractionCrossCheckTest(unittest.TestCase):
+    """T9: OpenAlex.is_retracted 와 Crossref.retractions(evidence["crossref"]
+    안에 실려 온다) 중 어느 쪽이든 철회를 가리키면 철회로 판정해야 한다.
+    4분면(둘 다 아님 / OpenAlex 만 / Crossref 만 / 둘 다) 전부를 확인한다."""
+
+    _RETRACTION = (
+        {"retraction_doi": "10.1/notice", "update_type": "retraction", "update_date": None},
+    )
+
+    def _build(self, *, openalex_retracted, crossref_retractions):
+        evidence = {
+            "crossref": {
+                "title": "Retinol and the skin barrier",
+                "retractions": crossref_retractions,
+            }
+        }
+        return verify.build(
+            record(is_retracted=openalex_retracted),
+            found_in_sources=["openalex", "semantic_scholar", "europepmc"],
+            evidence=evidence,
+        )
+
+    def test_neither_source_flags_a_retraction(self):
+        result = self._build(openalex_retracted=False, crossref_retractions=())
+        self.assertFalse(result["is_retracted"])
+        self.assertEqual(result["confidence_score"], 100)
+
+    def test_openalex_alone_flags_a_retraction(self):
+        result = self._build(openalex_retracted=True, crossref_retractions=())
+        self.assertTrue(result["is_retracted"])
+        self.assertEqual(result["confidence_score"], 0)
+
+    def test_crossref_alone_flags_a_retraction(self):
+        result = self._build(openalex_retracted=False, crossref_retractions=self._RETRACTION)
+        self.assertTrue(result["is_retracted"])
+        self.assertEqual(result["confidence_score"], 0)
+
+    def test_both_sources_flag_a_retraction(self):
+        result = self._build(openalex_retracted=True, crossref_retractions=self._RETRACTION)
+        self.assertTrue(result["is_retracted"])
+        self.assertEqual(result["confidence_score"], 0)
+
+    def test_does_not_add_a_new_verification_key(self):
+        """검증 표면 불변 — retractions 는 이미 evidence["crossref"] 안에 있다."""
+        result = self._build(openalex_retracted=False, crossref_retractions=self._RETRACTION)
+        self.assertEqual(
+            sorted(result),
+            [
+                "confidence_score",
+                "crossref_verified",
+                "evidence",
+                "found_in_sources",
+                "has_doi",
+                "is_retracted",
+                "title_match",
+            ],
+        )
+
+
 class ScoreParityWithLegacyTest(unittest.TestCase):
     """새 verify.build 가 레거시 papers.verify.build 와 동일한 판정을 내리는지
     고정 기대값으로 검증한다.
