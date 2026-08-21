@@ -79,19 +79,35 @@ def _update_date(updated):
 def parse_retractions(message: dict, doi: str) -> tuple[dict, ...]:
     """message 에서 철회 신호를 두 경로로 뽑는다. 순수 함수(네트워크·DB 없음).
 
-    경로 1 (relation): 철회'된' 논문 자신의 응답에 실린다 —
+    경로 1 (relation, role="retracted"): 철회'된' 논문 자신의 응답에 실린다 —
         relation["is-retracted-by"][].id 가 철회 공지의 DOI다. 우리 파이프라인이
         조회하는 DOI 는 거의 항상 이쪽(원 논문)이라 이게 주 경로다.
-    경로 2 (update-to): 철회 공지 자신의 응답에 실린다 — update-to[].DOI 가
-        원 논문의 DOI 다. 우리가 공지 DOI 자체를 수집하는 경우는 드물지만
-        파싱은 해둔다. type 에 "retraction" 이 포함된 항목만 쓴다 —
-        correction 등 다른 갱신 종류는 이번 태스크(철회 추적)의 범위 밖이라
-        무시한다(정정 논문 추적은 별도 태스크의 몫).
+    경로 2 (update-to, role="notice"): 철회 공지 자신의 응답에 실린다 —
+        update-to[].DOI 가 원 논문의 DOI 다. OpenAlex 가 공지를 독립 문서로
+        색인해 우리 파이프라인이 공지 DOI 자체를 수집하는 경우가 드물지
+        않아, 파싱만 하고 끝내지 않고 role 을 함께 태그한다(아래 참고).
+        type 에 "retraction" 이 포함된 항목만 쓴다 — correction 등 다른
+        갱신 종류는 이번 태스크(철회 추적)의 범위 밖이라 무시한다(정정 논문
+        추적은 별도 태스크의 몫).
+
+    role 태그 (리뷰 Important 대응): "이 message 가 기술하는 문서 자신이
+        철회된 논문인가, 철회 공지인가"를 항목마다 구분해 실어 보낸다 —
+        두 경로가 "retraction_doi" 자리에 넣는 DOI 의 실제 의미가 정반대이기
+        때문이다(경로 1 은 상대편이 공지, 경로 2 는 상대편이 원 논문). role
+        이 없으면 pipeline 이 두 경로를 구분 없이 doi=record 자신의 doi 로
+        조립해버려, 공지 문서 자신을 수집한 경우 retraction 테이블 행의
+        doi/retraction_doi 가 스키마 주석과 반대로 뒤집힌다(고쳐진 버그).
+        verify.build() 의 is_retracted 판정도 이 role 을 봐야 한다 — 공지
+        문서 자체는 철회'된' 논문이 아니라 철회를 알리는 문서이므로
+        role="notice" 만 있는 레코드의 점수를 0 으로 만들면 안 된다.
 
     doi(이 message 의 주인 DOI, 즉 fetch() 호출에 쓰인 DOI)와 우연히 같은
-    DOI 를 가리키는 항목은 자기 자신을 자기 철회 공지로 지목하는 모순이라
-    방어적으로 걸러낸다(API 오응답 방어) — 반환 dict 자체는 "doi" 를 담지
-    않는다(그 값은 pipeline 이 record["doi"] 로 채운다).
+    DOI 를 가리키는 항목은 자기 자신을 자기 철회 상대로 지목하는 모순이라
+    방어적으로 걸러낸다(API 오응답 방어). DOI 필드 자체가 없거나 빈 항목도
+    같은 이유로 건너뛴다(두 경로를 대칭으로 다룬다 — repository 의
+    None -> '' 강제에 기대지 않고 여기서 이미 무의미한 항목을 버린다).
+    반환 dict 자체는 "doi" 를 담지 않는다(그 값은 pipeline 이 role 에 따라
+    record["doi"] 또는 상대편 DOI 로 채운다).
     """
     if not isinstance(message, dict):
         return ()
@@ -107,7 +123,12 @@ def parse_retractions(message: dict, doi: str) -> tuple[dict, ...]:
             if not candidate or candidate.strip().lower() == own:
                 continue
             results.append(
-                {"retraction_doi": candidate, "update_type": "retraction", "update_date": None}
+                {
+                    "role": "retracted",
+                    "retraction_doi": candidate,
+                    "update_type": "retraction",
+                    "update_date": None,
+                }
             )
 
     for item in message.get("update-to") or []:
@@ -117,10 +138,11 @@ def parse_retractions(message: dict, doi: str) -> tuple[dict, ...]:
         if "retraction" not in update_type:
             continue
         candidate = item.get("DOI")
-        if candidate and candidate.strip().lower() == own:
+        if not candidate or candidate.strip().lower() == own:
             continue
         results.append(
             {
+                "role": "notice",
                 "retraction_doi": candidate,
                 "update_type": update_type,
                 "update_date": _update_date(item.get("updated")),

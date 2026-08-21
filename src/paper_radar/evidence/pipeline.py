@@ -119,6 +119,34 @@ def _apply_fills(record, result, fills):
             _fill(record, record_field, value)
 
 
+def _retraction_record(item, own_doi):
+    """crossref.parse_retractions() 항목 하나를 RetractionRecord 로 조립한다.
+
+    role 에 따라 doi/retraction_doi 자리가 뒤바뀐다(리뷰 Important 대응) —
+    role="retracted"(relation 경로, 기본값)면 이 레코드 자신이 철회된
+    논문이라 doi=own_doi, retraction_doi=item 이 가리키는 상대(공지) DOI.
+    role="notice"(update-to 경로)면 이 레코드 자신이 철회 공지라 그 반대다:
+    doi=item 이 가리키는 상대(원 논문) DOI, retraction_doi=own_doi(공지
+    자신의 DOI). role 이 없는 항목(하위 호환)은 "retracted" 로 간주한다 —
+    parse_retractions()/verify.build() 와 동일한 기본값이다.
+    """
+    if item.get("role", "retracted") == "notice":
+        return RetractionRecord(
+            doi=item.get("retraction_doi") or "",
+            retraction_doi=own_doi,
+            update_type=item.get("update_type") or "",
+            update_date=item.get("update_date"),
+            source="crossref",
+        )
+    return RetractionRecord(
+        doi=own_doi,
+        retraction_doi=item.get("retraction_doi"),
+        update_type=item.get("update_type") or "",
+        update_date=item.get("update_date"),
+        source="crossref",
+    )
+
+
 ENRICHERS: tuple[Enricher, ...] = (
     Enricher(
         name="semantic_scholar",
@@ -172,13 +200,21 @@ def enrich(conn, transport, record, error_counts=None):
     중단해야 하기 때문이다.
 
     철회 추적(T9): crossref 응답에 실려 온 retractions(evidence["crossref"]
-    ["retractions"])가 비어 있지 않으면 RetractionRecord 로 변환해
-    repository.upsert_records() 로 retraction 테이블에 저장한다. 이건
-    Unpaywall(T8)의 OA 해소처럼 "완전히 별개 테이블"이면서 confidence_score
-    와 무관한 부가 정보가 아니다 — 오히려 verify.build() 의 is_retracted
-    입력(교차 검증)에 이미 반영되는 신호라서, 그 신호를 만드는 evidence 가
-    이미 갖춰진 이 자리(enrich() 안, verify.build() 호출 직전)에서 함께
-    저장하는 편이 "어디서 왔는지"와 "왜 저장했는지"가 한곳에 있어 자연스럽다.
+    ["retractions"])가 비어 있지 않으면 _retraction_record() 로 RetractionRecord
+    로 변환해 repository.upsert_records() 로 retraction 테이블에 저장한다.
+    이건 Unpaywall(T8)의 OA 해소처럼 "완전히 별개 테이블"이면서
+    confidence_score 와 무관한 부가 정보가 아니다 — 오히려 verify.build() 의
+    is_retracted 입력(교차 검증)에 이미 반영되는 신호라서, 그 신호를 만드는
+    evidence 가 이미 갖춰진 이 자리(enrich() 안, verify.build() 호출 직전)에서
+    함께 저장하는 편이 "어디서 왔는지"와 "왜 저장했는지"가 한곳에 있어
+    자연스럽다.
+
+    수집 대상 자신이 철회 공지 문서일 수도 있다(OpenAlex 가 공지를 독립
+    문서로 색인하는 경우) — 그때는 retractions 항목이 role="notice" 로
+    태그돼 있고, _retraction_record() 가 doi/retraction_doi 자리를 뒤바꿔
+    조립한다(자세한 이유는 그 함수 docstring 참고). verify.build() 도 같은
+    role 을 봐서, role="notice" 뿐인 레코드(공지 문서 자신)는 철회'된' 논문이
+    아니므로 점수를 0 으로 만들지 않는다.
     """
     if error_counts is None:
         error_counts = {}
@@ -218,19 +254,9 @@ def enrich(conn, transport, record, error_counts=None):
 
     retractions = (evidence.get("crossref") or {}).get("retractions") or ()
     if retractions:
-        doi = record.get("doi") or ""
+        own_doi = record.get("doi") or ""
         repository.upsert_records(
-            conn,
-            [
-                RetractionRecord(
-                    doi=doi,
-                    retraction_doi=item.get("retraction_doi"),
-                    update_type=item.get("update_type") or "",
-                    update_date=item.get("update_date"),
-                    source="crossref",
-                )
-                for item in retractions
-            ],
+            conn, [_retraction_record(item, own_doi) for item in retractions]
         )
 
     record["verification"] = verify.build(record, found_in_sources=sources, evidence=evidence)

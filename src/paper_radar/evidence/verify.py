@@ -84,11 +84,25 @@ def build(record, found_in_sources=None, evidence=None):
     )
     title_match = similarity >= TITLE_MATCH_THRESHOLD
     # 교차 검증(T9): OpenAlex 의 is_retracted 와 Crossref 의 retractions(fetch()
-    # 가 evidence["crossref"] 안에 이미 실어 온 것) 어느 쪽이든 철회를 가리키면
-    # 철회로 판정한다 — 한쪽 소스가 반영을 놓쳐도(예: OpenAlex 색인 지연) 다른
-    # 쪽이 잡아낸다. evidence/verification 표면은 이 판정에 새 키를 더하지
-    # 않는다(retractions 는 이미 evidence["crossref"] 안에 있다).
-    is_retracted = bool(record.get("is_retracted")) or bool(crossref_evidence.get("retractions"))
+    # 가 evidence["crossref"] 안에 이미 실어 온 것) 어느 쪽이든 "이 레코드
+    # 자신이 철회된 논문"을 가리키면 철회로 판정한다 — 한쪽 소스가 반영을
+    # 놓쳐도(예: OpenAlex 색인 지연) 다른 쪽이 잡아낸다.
+    #
+    # role 구분 (리뷰 Important 대응): retractions 의 각 항목은
+    # crossref.parse_retractions() 가 role="retracted"(이 레코드가 철회된
+    # 논문 자신, relation 경로) 또는 role="notice"(이 레코드가 철회 공지
+    # 자신, update-to 경로)로 태그해 둔다. 공지 문서 자체는 철회'된' 논문이
+    # 아니라 철회를 알리는 문서라서, role="notice" 뿐인 레코드까지 점수를
+    # 0 으로 만드는 건 부정확하다(수정 전 동작) — role 이 없는 항목(과거
+    # 캐시 등 하위 호환)은 안전 쪽으로 "retracted" 로 간주한다.
+    #
+    # evidence/verification 표면은 이 판정에 새 키를 더하지 않는다
+    # (retractions 는 이미 evidence["crossref"] 안에 있다).
+    crossref_retracted = any(
+        item.get("role", "retracted") == "retracted"
+        for item in crossref_evidence.get("retractions") or ()
+    )
+    is_retracted = bool(record.get("is_retracted")) or crossref_retracted
 
     extra_sources = [name for name in sources if name != PRIMARY_SOURCE]
     score = SCORE_BASE

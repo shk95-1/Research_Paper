@@ -109,8 +109,14 @@ class FetchTest(unittest.TestCase):
         result, _ = self._fetch(payload, doi="10.1234/abc")
         self.assertEqual(
             result["retractions"],
-            ({"retraction_doi": "10.1234/retraction.abc", "update_type": "retraction",
-              "update_date": None},),
+            (
+                {
+                    "role": "retracted",
+                    "retraction_doi": "10.1234/retraction.abc",
+                    "update_type": "retraction",
+                    "update_date": None,
+                },
+            ),
         )
 
     def test_survives_an_empty_title_list(self):
@@ -151,6 +157,7 @@ class ParseRetractionsTest(unittest.TestCase):
             result,
             (
                 {
+                    "role": "retracted",
                     "retraction_doi": "10.1234/retraction.abc",
                     "update_type": "retraction",
                     "update_date": None,
@@ -174,6 +181,7 @@ class ParseRetractionsTest(unittest.TestCase):
             result,
             (
                 {
+                    "role": "notice",
                     "retraction_doi": "10.1234/abc",
                     "update_type": "retraction",
                     "update_date": "2024-03-15",
@@ -191,6 +199,20 @@ class ParseRetractionsTest(unittest.TestCase):
             "DOI": "10.1234/notice",
             "update-to": [
                 {"DOI": "10.1234/abc", "type": "correction", "updated": {"date-parts": [[2024]]}}
+            ],
+        }
+        self.assertEqual(crossref.parse_retractions(message, "10.1234/notice"), ())
+
+    def test_skips_an_update_to_entry_with_no_doi(self):
+        """Minor: relation 경로는 candidate DOI 가 없으면(빈 값) 이미 건너뛴다
+        (자기참조 방어 조건이 `not candidate`도 함께 본다) — update-to 경로도
+        대칭이어야 한다. repository 의 None -> '' 강제에 기대 무의미한 행이
+        저장되게 두지 않고, 파싱 단계에서 이미 걸러낸다."""
+        message = {
+            "DOI": "10.1234/notice",
+            "update-to": [
+                {"type": "retraction", "updated": {"date-parts": [[2024]]}},  # DOI 필드 자체가 없음
+                {"DOI": "", "type": "retraction"},  # DOI 가 빈 문자열
             ],
         }
         self.assertEqual(crossref.parse_retractions(message, "10.1234/notice"), ())

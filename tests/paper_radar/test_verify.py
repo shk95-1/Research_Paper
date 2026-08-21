@@ -209,7 +209,23 @@ class CrossrefRetractionCrossCheckTest(unittest.TestCase):
     4분면(둘 다 아님 / OpenAlex 만 / Crossref 만 / 둘 다) 전부를 확인한다."""
 
     _RETRACTION = (
-        {"retraction_doi": "10.1/notice", "update_type": "retraction", "update_date": None},
+        {
+            "role": "retracted",
+            "retraction_doi": "10.1/notice",
+            "update_type": "retraction",
+            "update_date": None,
+        },
+    )
+    # role="notice" — 이 레코드 자신이 철회 공지 문서다(update-to 경로).
+    # 공지는 철회'된' 논문이 아니라 철회를 알리는 문서이므로 점수를 0 으로
+    # 만들면 안 된다(리뷰 Important 대응 — 수정 전에는 이것도 0점 처리했다).
+    _NOTICE_ONLY = (
+        {
+            "role": "notice",
+            "retraction_doi": "10.1/original-paper",
+            "update_type": "retraction",
+            "update_date": "2024-03-15",
+        },
     )
 
     def _build(self, *, openalex_retracted, crossref_retractions):
@@ -242,6 +258,27 @@ class CrossrefRetractionCrossCheckTest(unittest.TestCase):
 
     def test_both_sources_flag_a_retraction(self):
         result = self._build(openalex_retracted=True, crossref_retractions=self._RETRACTION)
+        self.assertTrue(result["is_retracted"])
+        self.assertEqual(result["confidence_score"], 0)
+
+    def test_notice_only_retraction_does_not_zero_the_notices_own_score(self):
+        """공지 문서 자신을 수집한 경우(role="notice" 뿐) — 이 문서는 철회된
+        논문이 아니라 철회를 알리는 문서이므로 점수가 정상이어야 한다."""
+        result = self._build(openalex_retracted=False, crossref_retractions=self._NOTICE_ONLY)
+        self.assertFalse(result["is_retracted"])
+        self.assertEqual(result["confidence_score"], 100)
+
+    def test_a_retracted_role_item_still_zeroes_even_when_mixed_with_a_notice_role_item(self):
+        result = self._build(
+            openalex_retracted=False, crossref_retractions=self._NOTICE_ONLY + self._RETRACTION
+        )
+        self.assertTrue(result["is_retracted"])
+        self.assertEqual(result["confidence_score"], 0)
+
+    def test_a_retraction_item_without_a_role_key_is_treated_as_retracted_for_backward_compat(self):
+        legacy_item = ({"retraction_doi": "10.1/notice", "update_type": "retraction",
+                         "update_date": None},)
+        result = self._build(openalex_retracted=False, crossref_retractions=legacy_item)
         self.assertTrue(result["is_retracted"])
         self.assertEqual(result["confidence_score"], 0)
 

@@ -104,6 +104,29 @@ CROSSREF_PAYLOAD_RETRACTED = {
     }
 }
 
+# T9(리뷰 Important 대응) — WORK 의 doi("10.1/a")가 철회 "공지" 문서 자신인
+# 응답. update-to 경로(철회 공지 자신의 응답)를 쓴다 — role="notice" 로
+# 파싱돼, 이 레코드(공지 자신)의 점수는 0 이 되면 안 되고 retraction 테이블
+# 행의 doi/retraction_doi 는 뒤바뀌어(doi=원 논문, retraction_doi=공지 자신)
+# 저장돼야 한다.
+CROSSREF_PAYLOAD_NOTICE = {
+    "message": {
+        "DOI": "10.1/a",
+        "title": ["Retinol and the skin barrier"],
+        "container-title": ["Journal of Cosmetic Science"],
+        "publisher": "Elsevier BV",
+        "type": "journal-article",
+        "issued": {"date-parts": [[2024]]},
+        "update-to": [
+            {
+                "DOI": "10.1/original-paper",
+                "type": "retraction",
+                "updated": {"date-parts": [[2024, 3, 15]]},
+            }
+        ],
+    }
+}
+
 # unpaywall — WORK 의 doi("10.1/a")에 대한 응답. collect() 는 papers 저장이
 # 끝난 뒤 별도 단계로 이걸 조회한다(evidence/verify 에는 들어가지 않는다).
 UNPAYWALL_PAYLOAD = {
@@ -358,6 +381,36 @@ class EnrichTest(_DbTestCase):
         self.assertEqual(row["update_type"], "retraction")
         self.assertIsNone(row["update_date"])
         self.assertEqual(row["source"], "crossref")
+
+    def test_a_retraction_notice_record_swaps_doi_roles_and_keeps_its_own_score(self):
+        """리뷰 Important 대응: 수집 대상 자신이 철회 공지 문서일 때
+        (update-to 경로, role="notice") — (a) retraction 테이블 행의
+        doi/retraction_doi 가 스키마 의미(doi=철회된 논문, retraction_doi=
+        공지)대로 뒤바뀌어 저장되고, (b) 이 레코드(공지 자신)는 철회된
+        논문이 아니므로 점수가 0 이 되면 안 된다."""
+        result, _ = self._enrich(
+            responses=[
+                _json_response(S2_PAYLOAD),
+                _json_response(EPMC_PAYLOAD),
+                _json_response(CROSSREF_PAYLOAD_NOTICE),
+            ]
+        )
+        self.assertFalse(result["verification"]["is_retracted"])
+        self.assertEqual(result["verification"]["confidence_score"], 100)
+
+        row = self.conn.execute(
+            "SELECT * FROM retraction WHERE doi = '10.1/original-paper'"
+        ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row["retraction_doi"], "10.1/a")  # 공지 자신의 doi
+        self.assertEqual(row["update_type"], "retraction")
+        self.assertEqual(row["update_date"], "2024-03-15")
+        self.assertEqual(row["source"], "crossref")
+
+        # role="retracted" 경로(WORK 자신이 철회된 논문)로 오인해 doi="10.1/a"
+        # 로 저장되는 행은 없어야 한다 — role 뒤집힘 버그의 회귀 감지.
+        wrong_row = self.conn.execute("SELECT * FROM retraction WHERE doi = '10.1/a'").fetchone()
+        self.assertIsNone(wrong_row)
 
     def test_does_not_write_a_retraction_row_when_crossref_reports_none(self):
         result, _ = self._enrich(
