@@ -1,146 +1,201 @@
-# cosmetics_research_paper
+# paper-radar
 
-화장품 트렌드 분석 작업 공간. 논문 쪽 모듈 두 개가 들어 있습니다.
+화장품 연구 논문을 수집·검증·집계하는 로컬 CLI 도구입니다. 화장품 트렌드
+분석에서 나온 주장을 뒷받침할 논문 근거를 확보하고(evidence), 어떤 키워드가
+떠오르고 유지되는지 논문 전수를 받아 월 단위로 관찰하며(trend), 그 근거를
+임상시험(trials)·성분 실체(ingredient) 데이터로 보강합니다. 목적이 다르면
+모집단도 다릅니다 — `evidence` 는 표적 검색 결과이고, `trend` 는 검색어에
+걸리는 논문을 전수로 받습니다.
 
-| 모듈 | 목적 | 산출물 |
-|---|---|---|
-| [`papers/`](#papers--논문-근거-수집기) | **근거 확보.** 특정 주장을 뒷받침할 논문을 찾아 검증 | SQLite + JSON |
-| [`papers_trend/`](#papers_trend--논문-키워드-트렌드) | **트렌드 관찰.** 어떤 키워드가 떠오르고 유지되는지 | CSV 5개 |
+## 아키텍처
 
-목적이 다르면 모집단이 다릅니다. `papers/` 는 표적 검색 결과라 모집단이 아니고,
-`papers_trend/` 는 검색어에 걸리는 논문을 전수로 받습니다. 그래서 별도 모듈입니다.
+단일 패키지 `src/paper_radar/` 위에 8개 계층이 있습니다. 위에서 아래로
+갈수록 "무엇을 하는가"에서 "어떻게 요청을 보내는가"로 내려갑니다.
 
-## 설치 및 테스트
+| 계층 | 역할 |
+|---|---|
+| `contract.py`/`models.py`/`registry.py` | 소스가 지켜야 할 계약(`SourcePolicy`, `Fetch`)과 레코드 타입, 소스 등록 레지스트리 — 최상위 조립 계층 |
+| `evidence/` | 논문 근거 수집·검증 파이프라인(옛 `papers/`) — `evidence/pipeline.py`(수집 오케스트레이션), `evidence/verify.py`(신뢰도 점수) |
+| `trend/` | 논문 키워드 트렌드 파이프라인(옛 `papers_trend/`) — 전수 수집, 정규화, CSV 집계, 사전 확장 후보 제안 |
+| `trials/` | ClinicalTrials.gov 임상시험 레코드 수집·검색 |
+| `ingredients/` | PubChem/CosIng 성분 실체 해소(이름↔CAS↔CID↔INCI) |
+| `sources/` | 실제 API 8개(+CosIng 파서)의 요청·파싱 — 각 소스는 파싱 순수 함수와 네트워크 드라이버를 분리 |
+| `storage/` | SQLite 저장(`repository.py`), 스키마 마이그레이션(`schema.py` + `migrations/`), 실행 기록(`runlog.py`) |
+| `transport/` | 공통 HTTP 계층 — 인터벌 페이싱, 예산 추적, 인증 자동 주입, 타입 있는 예외(`errors.py`) |
 
-[uv](https://docs.astral.sh/uv/) 로 관리합니다. 두 모듈 모두 `src/paper_radar/`
-아래(`paper-radar` 패키지)로 이식되어 있고, `paper-radar` 콘솔 스크립트(또는
-`python -m paper_radar`) 하위 명령으로 씁니다 — 아래 각 절의 명령은 이
-기준입니다. (구 `papers`/`papers_trend` 패키지와 `python -m papers ...` 실행법은
-제거됐습니다. 상세 재작성은 T16 예정입니다.)
+계층 방향(예: `sources/` 가 `trend/` 를 import 하면 안 됨)은 관례가 아니라
+`tests/paper_radar/test_guards.py` 의 AST 기반 가드 테스트로 강제됩니다.
 
-```bash
-uv sync --extra dev   # .venv 구성 (requests, python-dotenv + pytest, ruff)
-uv run pytest         # tests/paper_radar 전부 (네트워크 안 씀)
-```
+## CLI 명령
 
-## papers — 논문 근거 수집기
+콘솔 스크립트 `paper-radar`(또는 `python -m paper_radar`) 아래 4개 그룹이
+있습니다. "네트워크" 열은 해당 명령이 외부 API 를 호출하는지 여부입니다.
 
-화장품 트렌드에서 도출한 주장을 뒷받침할 논문을 수집하고 검증합니다.
-PDF 원문은 내려받지 않고 메타데이터, 초록, 요약까지만 확보합니다.
+| 그룹 | 명령 | 네트워크 | 설명 |
+|---|---|:---:|---|
+| `evidence` | `collect` | O | 논문 수집(OpenAlex 주 소스 + Crossref DOI 검증 + Semantic Scholar/Europe PMC/PubMed 보강 3소스 + Unpaywall OA 링크), 신뢰도 점수와 함께 저장 |
+| `evidence` | `trend` | O | 연도별 논문 수 히스토그램(OpenAlex) |
+| `evidence` | `cite` | - | 저장된 논문에서 근거 인용용 검색 |
+| `trend` | `collect` | O | OpenAlex/PubMed 전수 수집(`--provider`, 기본 openalex) |
+| `trend` | `records` | - | 원본 JSONL 에서 집계용 필드 추출 요약 |
+| `trend` | `normalize` | - | 사전(`keyword_lexicon.json`)을 적용해 표준키로 접기 |
+| `trend` | `aggregate` | - | JSONL → CSV 집계(`--provider`, 기본 openalex) |
+| `trend` | `unmatched` | - | 사전 미매칭 표현을 빈도순으로 뽑는다 |
+| `trend` | `suggest` | - | unmatched 표현에 PubChem/CosIng 동의어 후보 제안(자동 등록 안 함) |
+| `trend` | `overlap` | - | openalex/pubmed raw 를 DOI 로 대조하는 교차 진단(지표 아님, `--provider` 없음) |
+| `trials` | `collect` | O | ClinicalTrials.gov v2 임상시험 레코드 수집 |
+| `trials` | `list` | - | 저장된 임상시험 키워드 검색 |
+| `ingredient` | `resolve` | O | PubChem 이름 → CID/CAS/동의어 조회·저장 |
+| `ingredient` | `show` | - | 저장된 성분 실체 조회 |
+| `ingredient` | `import-cosing` | - | `tool/fetch_cosing.py` 가 받아 둔 CosIng CSV 임포트 |
 
-무료 API 4개를 조합합니다. 인증 키는 필요하지 않습니다.
+"네트워크 -" 인 명령은 전부 로컬 SQLite/파일만 읽고 씁니다.
 
-| API | 역할 |
-|-----|------|
-| [OpenAlex](https://api.openalex.org) | 메인 검색, 연도별 집계 |
-| [Semantic Scholar](https://api.semanticscholar.org) | tldr 한 줄 요약 |
-| [Europe PMC](https://www.ebi.ac.uk/europepmc/) | 생명과학 초록 보강 |
-| [Crossref](https://api.crossref.org) | DOI 검증 |
+## 소스
 
-### 사용법
+| 소스 | 역할 | 인증 | 요율 |
+|---|---|---|---|
+| [OpenAlex](https://api.openalex.org) | evidence 메인 검색 + trend 전수 수집(연도별 집계 포함) | `OPENALEX_API_KEY`(선택, 사실상 필수) | 무인증 하루 1,000크레딧(≈search 100건), 키 등록 시 100,000크레딧/일. 요청당 계량제 |
+| [Crossref](https://api.crossref.org) | DOI 검증(30점) + 철회 공지 교차검증 | `OPENALEX_EMAIL`(polite 풀 mailto) | polite 풀 10req/s 상한의 절반(0.2초 간격) |
+| [Semantic Scholar](https://api.semanticscholar.org) | tldr 한 줄 요약 보강 | `SEMANTIC_SCHOLAR_API_KEY`(권장) | 키 없으면 4초 간격(익명 풀 429 방지), 키 있으면 1초 간격(1req/s) |
+| [Europe PMC](https://www.ebi.ac.uk/europepmc/) | 생명과학 초록 보강, DOI 없이도 조회 가능한 유일한 보강 소스 | 없음 | 0.2초 간격 |
+| [Unpaywall](https://api.unpaywall.org) | DOI → 합법 OA 위치(PDF 직링크만, 파일은 안 받음) | `OPENALEX_EMAIL`(email 파라미터 필수) | 하루 10만 건, 예산 헤더 없음 |
+| [PubMed E-utilities](https://eutils.ncbi.nlm.nih.gov) | evidence MeSH 보강 + trend 의 제2 프로바이더(월별 축) | `NCBI_API_KEY`(선택) | 무키 3req/s, 키 있으면 10req/s |
+| [ClinicalTrials.gov v2](https://clinicaltrials.gov/api/v2/) | 임상시험 레코드(`trials`) | 없음 | 문서화된 상한 없음, 0.5초 간격(예의) |
+| [PubChem PUG-REST](https://pubchem.ncbi.nlm.nih.gov/rest/pug/) | 성분 실체 해소(`ingredient`) — 이름↔CID↔CAS↔동의어 | 없음 | 무키 5req/s / 400req/min |
+| CosIng(EU 화장품 성분 DB) | INCI 참조 테이블(`ingredient import-cosing`) | 없음(일회성 CSV 다운로드) | API 아님 — `tool/fetch_cosing.py` 로 사람이 미리 받아 둔 파일을 읽는다 |
 
-```bash
-# 수집 (기본 기간은 최근 10년)
-uv run paper-radar evidence collect --query "cosmetic" --from 2016 --to 2026 --limit 100
+## 환경 변수
 
-# 연도별 논문 수
-uv run paper-radar evidence trend --query "cosmetic retinol"
+`.env` 에 넣습니다(`.env.example` 참고). 어느 것도 필수는 아니지만 첫 번째는
+사실상 필수입니다.
 
-# 저장된 논문에서 근거 뽑기
-uv run paper-radar evidence cite --keyword "skin barrier" --min-confidence 70
-```
+| 변수 | 용도 |
+|---|---|
+| `OPENALEX_API_KEY` | 사실상 필수. 없으면 무인증 예산(하루 1,000크레딧, search 기준 ~100건)에 묶입니다 |
+| `OPENALEX_EMAIL` | **Crossref polite 풀 + Unpaywall 의 필수 email 파라미터용.** OpenAlex 자체는 2026-02-13부터 mailto/polite pool 을 폐지해 이 값을 받지 않습니다 |
+| `SEMANTIC_SCHOLAR_API_KEY` | 강력 권장. 익명 풀이 포화 상태라 429 가 잦습니다 |
+| `NCBI_API_KEY` | 선택. 있으면 PubMed E-utilities 요율이 3req/s → 10req/s 로 늘어납니다 |
 
-결과는 `papers/out/papers.db`(SQLite)와 `papers/out/papers.json`에 쌓입니다.
-같은 논문을 다시 수집하면 DOI 기준으로 갱신됩니다.
+## 신뢰도 점수
 
-### 신뢰도 점수
-
-논문 1건마다 수집 시점에 계산해서 함께 저장합니다.
+`evidence collect` 가 논문 1건마다 수집 시점에 계산해 함께 저장합니다.
+배분은 고정입니다.
 
 | 항목 | 점수 |
-|------|------|
-| OpenAlex에 존재 | 5 |
-| Crossref에서 DOI 검증됨 | 30 |
-| Crossref 제목이 일치 (유사도 0.85 이상) | 25 |
-| 추가 소스에서 발견 (개당 15, 최대 30) | 30 |
+|---|---|
+| OpenAlex 에 존재 | 5 |
+| Crossref 에서 DOI 검증됨 | 30 |
+| Crossref 제목이 일치(유사도 0.85 이상) | 25 |
+| 추가 소스에서 발견(개당 15, 최대 30) | 30 |
 | 초록 확보 | 10 |
 | **철회된 논문** | **총점 0** |
 
-DOI가 없는 논문은 버리지 않고 `has_doi: false`로 남깁니다.
+DOI 가 없는 논문은 버리지 않고 `has_doi: false` 로 남깁니다. 철회 판정은
+OpenAlex 의 `is_retracted` **또는** Crossref 의 relation(`retractions`) 교차
+검증 어느 한쪽이라도 걸리면 철회로 봅니다(한쪽 색인 지연을 다른 쪽이 잡아냄).
+**단, 철회 공지 문서 자체(notice-only — "이 논문이 철회됐다"고 알리는 문서)
+는 철회'된' 논문이 아니므로 0점 처리 대상이 아닙니다** — 공지와 철회 대상을
+role 로 구분해서 판정합니다.
 
-### 검색 범위에 대한 주의
+## exit code
 
-`--query`는 영문만 받습니다. OpenAlex는 제목과 초록에서 검색하며
-(`title_and_abstract.search`), 정렬은 OpenAlex 기본값인 `relevance_score`입니다.
-relevance는 인용수를 크게 반영하므로 **최근 논문이 구조적으로 밀려납니다.**
-최근 동향을 보려면 연도 범위를 좁히세요 (`--from 2024`).
+- `0` — 완전 성공
+- `1` — 부분 성공(예산 소진으로 중단, 일부 소스 오류 등 — `stopped_reason`
+  이 있거나 오류 카운트가 있으면 partial)
+- `2` — 예약(argparse 자체의 사용법 오류가 이 코드를 씀 — 이 저장소 코드가
+  직접 return 하지는 않습니다)
 
-### 환경 변수
+레거시(구 `papers`/`papers_trend`)와 의도적으로 다른 동작 2가지(원장 T6
+Ruling):
 
-`.env`에 넣습니다. 어느 것도 필수는 아닙니다.
+1. `trend collect --profile <알 수 없는 프로파일>` 은 이제 warn + exit **1**
+   입니다(레거시는 `parser.error`/exit 2였습니다).
+2. 수집이 중간에 멈추면(`stopped_early`) exit **1** 입니다(레거시는 0이었습니다).
 
-| 변수 | 용도 |
-|------|------|
-| `OPENALEX_API_KEY` | 사실상 필수. 없으면 무인증 예산(하루 ~100 search)에 묶입니다 |
-| `OPENALEX_EMAIL` | Crossref polite 풀 연락처 (OpenAlex 폐지, 2026-02) |
-| `SEMANTIC_SCHOLAR_API_KEY` | 강력 권장. 익명 풀이 포화 상태입니다 |
+둘 다 새 exit code 규칙(0 완전/1 부분)에 맞춘 것입니다. 레거시 CLI 를 셸
+스크립트로 감싸 종료 코드를 분기하던 경우, 이 저장소로 옮길 때 그 분기를
+다시 확인하세요.
 
-이메일은 User-Agent로 전송됩니다. OpenAlex는 2026-02-13부터 mailto/polite pool을
-폐지해 더 이상 이 값을 받지 않고, Crossref의 polite 풀(단건 DOI 조회)에만 유효합니다.
+## 산출물 위치
 
-### 테스트
+- `papers/out/papers.db`(SQLite) + `papers/out/papers.json` — `evidence`
+  파이프라인 결과. 경로는 레거시와 동일하게 유지했습니다.
+- `out/trend/{query_id}/` — `trend` 파이프라인 CSV. 프로파일당 최대 7종:
+  `monthly_denominator.csv`, `keyword_monthly.csv`, `topic_monthly.csv`,
+  `trend_metrics.csv`, `unmatched_*.csv`(이상 openalex 축, 5종),
+  `mesh_monthly.csv`, `provider_overlap.csv`(이상 pubmed 축이 있어야 생기는
+  2종, T15). 컬럼 사전과 해석 caveat 은 [`docs/trend-data.md`](docs/trend-data.md)
+  에 있습니다.
+- `data/` — raw 원본(`data/raw/{provider}/{query_id}/*.jsonl` 등)과 참조
+  다운로드(`data/reference/cosing/`). `.gitignore` 대상입니다 — 저장소만으로
+  CSV 를 재생성할 수 없고, `trend collect`/`ingredient import-cosing` 부터
+  다시 실행해야 합니다.
+
+DB 스키마 마이그레이션은 `repository.connect()` 가 열 때마다 `PRAGMA
+user_version` 을 보고 자동 적용합니다(현재 head: m0008, 8개 마이그레이션) —
+따로 실행할 명령이 없습니다.
+
+### 재생성 절차
+
+`data/` 가 gitignore 대상이므로, 새 환경에서는 다음 순서로 처음부터 다시
+채웁니다(각 명령의 상세 옵션은 위 CLI 명령 표, trend CSV 는
+[`docs/trend-data.md`](docs/trend-data.md) 의 "재생성 방법" 참고).
 
 ```bash
-# 단위 테스트. 네트워크를 쓰지 않습니다
-uv run pytest tests/paper_radar
+# evidence: DB 는 재수집할 때마다 DOI 기준으로 갱신되므로 몇 번이든 다시 실행 가능
+uv run paper-radar evidence collect --query "cosmetic retinol" --from 2016 --to 2026
 
-# 실제 API 응답 형태가 바뀌었는지 확인 (네트워크를 씁니다)
+# trend: collect(네트워크, 커서 저장) -> records/normalize/aggregate/unmatched(로컬)
+uv run paper-radar trend collect   --profile sunscreen
+uv run paper-radar trend aggregate --profile sunscreen
+
+# trials / ingredient: 각자 독립된 저장 표면(trial/ingredient 테이블)
+uv run paper-radar trials collect --query "niacinamide"
+uv run paper-radar ingredient resolve --name "niacinamide"
+uv run paper-radar ingredient import-cosing --path data/reference/cosing/cosing.csv
+```
+
+## 읽기 전에
+
+`trend` 산출물을 열기 전에 [`docs/trend-data.md`](docs/trend-data.md) 의
+caveat 1(OpenAlex 키워드 어휘가 2025-10 에 교체됨 — `trend_metrics.csv` 의
+`growth_ratio`/`trend_class` 를 그대로 믿으면 안 됩니다)를 반드시 읽으세요.
+가설·반증조건의 측정 근거는 [`docs/trend-assumptions.md`](docs/trend-assumptions.md)
+에, 이 저장소가 의도적으로 안 했거나 미룬 것들은
+[`docs/judgment-debt.md`](docs/judgment-debt.md) 에 있습니다.
+
+## 설치·테스트
+
+[uv](https://docs.astral.sh/uv/) 로 관리합니다.
+
+```bash
+uv sync --extra dev            # .venv 구성 (requests, python-dotenv + pytest, ruff)
+uv run pytest                  # tests/paper_radar 전부 (네트워크 안 씀)
+uv run ruff check .            # 린트
+
+# 실제 API 응답 형태가 바뀌었는지 확인 (네트워크를 씁니다, 사람이 수동 실행)
 uv run python tool/live_smoke.py
+
+# CosIng CSV 다운로드 (일회성, 분기 갱신 시 재실행)
+uv run python tool/fetch_cosing.py --url <CosIng CSV 다운로드 URL>
 ```
 
-의존성은 `requests`와 `python-dotenv`뿐입니다. 나머지는 표준 라이브러리입니다.
+의존성은 `requests` 와 `python-dotenv` 뿐입니다. 나머지는 표준 라이브러리입니다.
 
-설계 문서: [docs/superpowers/specs/2026-08-19-papers-evidence-collector-design.md](docs/superpowers/specs/2026-08-19-papers-evidence-collector-design.md)
+## 사용자 액션
 
----
+- **키 발급**(무료, 코드와 무관하게 병행 가능): OpenAlex(openalex.org),
+  Semantic Scholar, NCBI(선택). 키 없이도 모든 명령이 동작하지만 예산이
+  좁아집니다 — 위 환경 변수 표 참고.
+- **KCI·ScienceON 신청**: 한국 논문(대한화장품학회지 등, 국제 색인의 사각
+  지대) 소스는 승인 절차가 필요합니다. 신청은 지금 넣어 둘 수 있지만
+  **통합은 이번 범위 밖**입니다(계획이 "승인 나기 전 착수하지 않는다"고
+  명시) — 승인 후 별도 태스크로 진행합니다. 자세한 사정은
+  [`docs/judgment-debt.md`](docs/judgment-debt.md) 의 "알고 미룸" 절 참고.
 
-## papers_trend — 논문 키워드 트렌드
+## 설계 문서
 
-화장품 분야에서 어떤 키워드가 떠오르고 어떤 것이 유지되는지 봅니다.
-OpenAlex 단독으로 전수 수집하고, 월 단위로 집계해 CSV 5개를 냅니다.
-시각화는 이 모듈의 범위가 아닙니다.
-
-현재 데이터: **`sunscreen` 프로파일 전수 7,623건** (2023-09 ~ 2026-08, 36개월).
-
-```bash
-uv run paper-radar trend collect   --profile sunscreen   # 네트워크
-uv run paper-radar trend aggregate --profile sunscreen   # CSV 생성
-uv run paper-radar trend unmatched --profile sunscreen   # 사전 확장 후보
-```
-
-산출물은 [`out/trend/sunscreen/`](out/trend/sunscreen/) 에 있습니다.
-
-| 파일 | 알갱이 | 행 |
-|---|---|---|
-| `monthly_denominator.csv` | 월 | 36 |
-| `keyword_monthly.csv` | 키워드 x 월 | 24,584 |
-| `topic_monthly.csv` | 주제 x 월 | 8,540 |
-| `trend_metrics.csv` | 키워드 | 6,455 |
-| `unmatched_sunscreen_keywords.csv` | 미매칭 표현 | 200 |
-
-### 읽기 전에
-
-컬럼별 설명·caveat(OpenAlex 키워드 어휘가 2025-10 에 교체되어 `trend_class`
-의 `declining` 상당수가 인공물이라는 것 포함)과 가설·반증조건 문서는 구
-`papers_trend/README.md`, `papers_trend/ASSUMPTIONS.md` 에 있었습니다. T7 이
-구 `papers_trend/` 패키지를 제거하면서 이 문서들도 git 이력으로만 남았습니다
-(예: `git show 24444fe:papers_trend/README.md`) — 새 위치로의 재작성은 T16
-예정입니다. 그때까지는 시계열을 `is_in_lexicon = True` 로 걸러서 보세요.
-
-### 원본 데이터는 저장소에 없습니다
-
-OpenAlex 응답 원본(JSONL 303MB)은 올리지 않았습니다. 따라서 **CSV 를 이
-저장소만으로 재생성할 수 없습니다.** 다시 만들려면 `trend collect` 부터
-실행해야 하고, OpenAlex 일일 예산을 씁니다(2026-02-13부터 계량제: 목록/페이지
-호출 10크레딧, search 호출 $0.001, 무인증 1,000크레딧/일, 무료 키 등록 시
-100,000크레딧/일. UTC 자정 초기화).
+[docs/superpowers/specs/2026-08-19-papers-evidence-collector-design.md](docs/superpowers/specs/2026-08-19-papers-evidence-collector-design.md)
+— 2026-08-19 작성된 초기 설계입니다. 구 `papers/` 패키지 시대의 문서이고
+본문은 수정하지 않았습니다. 현재 구조는 이 README 를 기준으로 보세요.
