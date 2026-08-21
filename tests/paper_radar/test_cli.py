@@ -14,7 +14,7 @@ from unittest import mock
 
 from paper_radar import cli
 from paper_radar.evidence.pipeline import CollectReport
-from paper_radar.models import OaLocationRecord, TrialRecord
+from paper_radar.models import IngredientRecord, OaLocationRecord, TrialRecord
 from paper_radar.storage import repository
 
 
@@ -144,6 +144,31 @@ class ParseArgsTest(unittest.TestCase):
     def test_trials_help_exits_cleanly(self):
         with self.assertRaises(SystemExit) as ctx, contextlib.redirect_stdout(io.StringIO()):
             cli.parse_args(["trials", "--help"])
+        self.assertEqual(ctx.exception.code, 0)
+
+    def test_ingredient_resolve_requires_a_name(self):
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            cli.parse_args(["ingredient", "resolve"])
+
+    def test_ingredient_resolve_reads_the_name(self):
+        args = cli.parse_args(["ingredient", "resolve", "--name", "niacinamide"])
+        self.assertEqual(args.name, "niacinamide")
+
+    def test_ingredient_show_requires_a_name(self):
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            cli.parse_args(["ingredient", "show"])
+
+    def test_ingredient_show_reads_the_name(self):
+        args = cli.parse_args(["ingredient", "show", "--name", "niacinamide"])
+        self.assertEqual(args.name, "niacinamide")
+
+    def test_no_command_under_ingredient_exits_with_usage(self):
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            cli.parse_args(["ingredient"])
+
+    def test_ingredient_help_exits_cleanly(self):
+        with self.assertRaises(SystemExit) as ctx, contextlib.redirect_stdout(io.StringIO()):
+            cli.parse_args(["ingredient", "--help"])
         self.assertEqual(ctx.exception.code, 0)
 
 
@@ -611,6 +636,122 @@ class TrialsListCliTest(unittest.TestCase):
 
     def test_reports_when_the_keyword_matches_nothing(self):
         exit_code, text = self._list(["trials", "list", "--keyword", "niacinamide"])
+        self.assertEqual(exit_code, 0)
+        self.assertIn("결과가 없습니다", text)
+
+
+def ingredient_record(**overrides):
+    base = {
+        "name_key": "niacinamide",
+        "inci_name": None,
+        "cid": 936,
+        "cas": "98-92-0",
+        "synonyms": ("niacinamide", "nicotinamide", "98-92-0"),
+        "sources": ("pubchem",),
+        "fetched_at": "2026-08-21T00:00:00Z",
+    }
+    base.update(overrides)
+    return IngredientRecord(**base)
+
+
+def resolve_report(record=None, status="ok"):
+    """cli.ingredients_resolve(paper_radar.ingredients.resolve 별칭)의
+    ResolveReport. 파이프라인 레벨 검증(RunLog 자기기록 등)은
+    tests/paper_radar/test_ingredients_resolve.py 로 옮겼다 — 여기(test_cli.py)
+    는 TrialsCollectCliTest 와 같은 결로 인자 전달·출력·exit code 만 본다
+    (ingredients_resolve.run() 을 mock.patch 로 대체)."""
+    return cli.ingredients_resolve.ResolveReport(run_id="test-run", record=record, status=status)
+
+
+class IngredientResolveCliTest(unittest.TestCase):
+    """`ingredient resolve` 의 인자 전달·출력·exit code — ingredients_resolve.run()
+    을 mock.patch 로 대체해 TrialsCollectCliTest 와 같은 결로 검증한다."""
+
+    def setUp(self):
+        handle, self.path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        os.unlink(self.path)
+        self.addCleanup(lambda: os.path.exists(self.path) and os.unlink(self.path))
+
+    def _resolve(self, argv, resolve_return):
+        output = io.StringIO()
+        with (
+            mock.patch.object(
+                cli.ingredients_resolve, "run", return_value=resolve_return
+            ) as run,
+            contextlib.redirect_stdout(output),
+        ):
+            exit_code = cli.run(cli.parse_args(argv + ["--db", self.path]))
+        return exit_code, output.getvalue(), run
+
+    def test_passes_the_parsed_name_through(self):
+        _, _, run = self._resolve(
+            ["ingredient", "resolve", "--name", "niacinamide"],
+            resolve_report(record=ingredient_record()),
+        )
+        _, _, name = run.call_args.args
+        self.assertEqual(name, "niacinamide")
+
+    def test_prints_the_resolved_fields_on_success(self):
+        exit_code, text, _ = self._resolve(
+            ["ingredient", "resolve", "--name", "niacinamide"],
+            resolve_report(record=ingredient_record()),
+        )
+        self.assertEqual(exit_code, 0)
+        self.assertIn("niacinamide", text)
+        self.assertIn("936", text)
+        self.assertIn("98-92-0", text)
+
+    def test_prints_an_absence_message_and_exits_zero_when_not_found(self):
+        """부재는 실패가 아니다(브리핑 지시) — exit code 0, 안내 메시지만."""
+        exit_code, text, _ = self._resolve(
+            ["ingredient", "resolve", "--name", "not-a-real-ingredient"],
+            resolve_report(record=None, status="not_found"),
+        )
+        self.assertEqual(exit_code, 0)
+        self.assertIn("PubChem 에 없는 이름입니다", text)
+
+
+class IngredientShowCliTest(unittest.TestCase):
+    """`ingredient show` — 로컬 DB 만 읽는다(네트워크 없음)."""
+
+    def setUp(self):
+        handle, self.path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        os.unlink(self.path)
+        self.addCleanup(lambda: os.path.exists(self.path) and os.unlink(self.path))
+
+    def _show(self, argv):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            exit_code = cli.run(cli.parse_args(argv + ["--db", self.path]))
+        return exit_code, output.getvalue()
+
+    def test_prints_the_stored_ingredient_fields(self):
+        conn = repository.connect(self.path)
+        repository.upsert_records(conn, [ingredient_record()])
+        conn.close()
+
+        exit_code, text = self._show(["ingredient", "show", "--name", "niacinamide"])
+        self.assertEqual(exit_code, 0)
+        self.assertIn("niacinamide", text)
+        self.assertIn("936", text)
+        self.assertIn("98-92-0", text)
+        self.assertIn("pubchem", text)
+
+    def test_normalizes_the_name_before_looking_it_up(self):
+        """"Niacinamide"(대문자 섞임)로 조회해도 저장 시 정규화된
+        name_key("niacinamide")로 찾아야 한다(pubchem.name_key() 재사용)."""
+        conn = repository.connect(self.path)
+        repository.upsert_records(conn, [ingredient_record()])
+        conn.close()
+
+        exit_code, text = self._show(["ingredient", "show", "--name", "  Niacinamide  "])
+        self.assertEqual(exit_code, 0)
+        self.assertIn("niacinamide", text)
+
+    def test_reports_when_nothing_is_stored_for_the_name(self):
+        exit_code, text = self._show(["ingredient", "show", "--name", "unknown-ingredient"])
         self.assertEqual(exit_code, 0)
         self.assertIn("결과가 없습니다", text)
 

@@ -1,5 +1,5 @@
-"""실제 API 를 때리는 스모크 테스트 — 7개 소스(T10 pubmed, T11 clinicaltrials 포함)의
-실제 응답 형태 드리프트 감지용.
+"""실제 API 를 때리는 스모크 테스트 — 8개 소스(T10 pubmed, T11 clinicaltrials,
+T12 pubchem 포함)의 실제 응답 형태 드리프트 감지용.
 
 papers/tests/live_smoke.py(T7 에서 제거된 구 버전)를 paper_radar.sources /
 paper_radar.transport 계약 기준으로 이식했다. 파일이 tool/ 아래 있고
@@ -29,6 +29,7 @@ from paper_radar.sources import (
     crossref,
     europepmc,
     openalex,
+    pubchem,
     pubmed,
     semantic_scholar,
     unpaywall,
@@ -169,6 +170,22 @@ class LiveSmokeTest(unittest.TestCase):
             any(r.phase for r in records),
             "phase 가 전부 비었습니다 — designModule 구조를 확인하세요",
         )
+
+    def test_pubchem_still_resolves_niacinamide_to_cid_936(self):
+        # T12 브리핑의 실측치(2026-08 조사): niacinamide -> CID 936. 이 값이
+        # 바뀌면 name/{name}/cids 경로 자체가 바뀐 것이다.
+        record = pubchem.resolve(self.transport, "niacinamide")
+        self.assertIsNotNone(record, "PubChem 이 niacinamide 를 해소하지 못했습니다")
+        self.assertEqual(record.cid, 936)
+        self.assertEqual(record.cas, "98-92-0")
+        self.assertIn("nicotinamide", [s.lower() for s in record.synonyms])
+        self.assertEqual(record.sources, ("pubchem",))
+
+    def test_pubchem_still_404s_on_an_unknown_name(self):
+        # 새 계약에서는 "그 이름을 모른다"가 404(NotFound)로 전파된다 —
+        # sources/pubchem.py 의 resolve() docstring 참고.
+        with self.assertRaises(NotFound):
+            pubchem.resolve(self.transport, "definitely-not-a-real-ingredient-name-xyz")
 
     def test_clinicaltrials_still_pages_past_the_first_page_size(self):
         # niacinamide 는 실측 1,600건대 — pageSize 상한(100)을 넘겨 커서가

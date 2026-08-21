@@ -17,14 +17,15 @@ from urllib.parse import urlsplit
 
 from paper_radar import registry
 
-# 등록 부작용 트리거 — registry.SOURCES 를 검사하려면 7개 소스 모듈(T10 의
-# pubmed, T11 의 clinicaltrials 포함)이 먼저 import 되어 @register 데코레이터가
-# 실행돼야 한다.
+# 등록 부작용 트리거 — registry.SOURCES 를 검사하려면 8개 소스 모듈(T10 의
+# pubmed, T11 의 clinicaltrials, T12 의 pubchem 포함)이 먼저 import 되어
+# @register 데코레이터가 실행돼야 한다.
 from paper_radar.sources import (  # noqa: F401
     clinicaltrials,
     crossref,
     europepmc,
     openalex,
+    pubchem,
     pubmed,
     semantic_scholar,
     unpaywall,
@@ -56,14 +57,24 @@ def _module_name(path: Path) -> str:
 
 def _layer_of(module_name: str) -> str:
     """모듈 이름에서 계층 이름을 뽑는다. sources/storage/evidence/trend/trials/
-    transport 만 고유 계층으로 취급하고, 그 외(cli/__init__/__main__/contract/
-    models/registry)는 "top"(계층 규칙의 대상이 아닌 조립·계약 계층)으로
-    묶는다. trials(T11)는 evidence/trend 와 대칭인 세 번째 독립 파이프라인
-    이다 — trial 테이블이라는 완전히 별개의 저장 표면을 쓴다."""
+    ingredients/transport 만 고유 계층으로 취급하고, 그 외(cli/__init__/
+    __main__/contract/models/registry)는 "top"(계층 규칙의 대상이 아닌
+    조립·계약 계층)으로 묶는다. trials(T11)는 evidence/trend 와 대칭인 세
+    번째 독립 파이프라인이고, ingredients(T12)는 그 넷째 — 각자 완전히
+    별개의 저장 표면(trial/ingredient 테이블)을 쓴다."""
     parts = module_name.split(".")
     if len(parts) < 2:
         return "top"
-    if parts[1] in {"sources", "storage", "evidence", "trend", "trials", "transport"}:
+    known_layers = {
+        "sources",
+        "storage",
+        "evidence",
+        "trend",
+        "trials",
+        "ingredients",
+        "transport",
+    }
+    if parts[1] in known_layers:
         return parts[1]
     return "top"
 
@@ -124,16 +135,38 @@ _SOURCES_ALLOWED_PREFIXES = (
 # 않는 순수 값 타입 모듈이라 이 의존이 역방향 계층 위반을 만들지 않는다.
 _STORAGE_ALLOWED_PREFIXES = ("paper_radar.storage", "paper_radar.models")
 
-# evidence/*, trend/*, trials/*: 서로의 존재를 몰라야 한다(세 파이프라인은
-# 독립 산출물 — SQLite+JSON(papers 테이블) vs CSV vs SQLite(trial 테이블)).
-# cli 도 몰라야 한다(cli 는 여러 계층을 조립하는 상위 계층이라 하위 계층이
-# 이를 알면 순환 의존이 생긴다). trials(T11)는 원래 이 러너가 cli.py 안에
-# 있어 evidence.pipeline/trend.collect 에 이은 세 번째 사본이 CLI 계층에
-# 생겼다는 코드리뷰 지적으로 여기로 옮겨졌다 — evidence/trend 와 같은
-# 수준의 격리를 이 가드로 강제한다.
-_EVIDENCE_FORBIDDEN_PREFIXES = ("paper_radar.trend", "paper_radar.trials", "paper_radar.cli")
-_TREND_FORBIDDEN_PREFIXES = ("paper_radar.evidence", "paper_radar.trials", "paper_radar.cli")
-_TRIALS_FORBIDDEN_PREFIXES = ("paper_radar.evidence", "paper_radar.trend", "paper_radar.cli")
+# evidence/*, trend/*, trials/*, ingredients/*: 서로의 존재를 몰라야 한다(네
+# 파이프라인은 독립 산출물 — SQLite+JSON(papers 테이블) vs CSV vs
+# SQLite(trial 테이블) vs SQLite(ingredient 테이블)). cli 도 몰라야 한다(cli
+# 는 여러 계층을 조립하는 상위 계층이라 하위 계층이 이를 알면 순환 의존이
+# 생긴다). trials(T11)는 원래 이 러너가 cli.py 안에 있어 evidence.pipeline/
+# trend.collect 에 이은 세 번째 사본이 CLI 계층에 생겼다는 코드리뷰 지적으로
+# 여기로 옮겨졌다 — evidence/trend 와 같은 수준의 격리를 이 가드로 강제한다.
+# ingredients(T12)는 처음부터 이 격리를 갖고 태어난 네 번째 파이프라인이다.
+_EVIDENCE_FORBIDDEN_PREFIXES = (
+    "paper_radar.trend",
+    "paper_radar.trials",
+    "paper_radar.ingredients",
+    "paper_radar.cli",
+)
+_TREND_FORBIDDEN_PREFIXES = (
+    "paper_radar.evidence",
+    "paper_radar.trials",
+    "paper_radar.ingredients",
+    "paper_radar.cli",
+)
+_TRIALS_FORBIDDEN_PREFIXES = (
+    "paper_radar.evidence",
+    "paper_radar.trend",
+    "paper_radar.ingredients",
+    "paper_radar.cli",
+)
+_INGREDIENTS_FORBIDDEN_PREFIXES = (
+    "paper_radar.evidence",
+    "paper_radar.trend",
+    "paper_radar.trials",
+    "paper_radar.cli",
+)
 
 
 class LayerDirectionTest(unittest.TestCase):
@@ -191,6 +224,16 @@ class LayerDirectionTest(unittest.TestCase):
             if _starts_with_any(target, _TRIALS_FORBIDDEN_PREFIXES)
         ]
         self.assertEqual(violations, [], f"trials/* 계층 위반: {violations}")
+
+    def test_ingredients_modules_do_not_import_evidence_trend_trials_or_cli(self):
+        violations = [
+            f"{_module_name(path)}: {target}"
+            for path in _iter_py_files()
+            if _layer_of(_module_name(path)) == "ingredients"
+            for target in _imports_of(path)
+            if _starts_with_any(target, _INGREDIENTS_FORBIDDEN_PREFIXES)
+        ]
+        self.assertEqual(violations, [], f"ingredients/* 계층 위반: {violations}")
 
     def test_only_the_entry_point_module_imports_cli(self):
         violations = [
@@ -253,7 +296,8 @@ class SourceDeclarationConsistencyTest(unittest.TestCase):
         """레지스트리 순회 검사가 실제로 뭔가를 보고 있는지 확인한다 — 등록
         자체가 (import 순서 문제 등으로) 빠지면 위 검사가 0건을 통과시키며
         조용히 무력화된다. T10 이 pubmed 를 추가해 다섯에서 여섯, T11 이
-        clinicaltrials 를 추가해 여섯에서 일곱이 됐다."""
+        clinicaltrials 를 추가해 여섯에서 일곱, T12 가 pubchem 을 추가해
+        일곱에서 여덟이 됐다."""
         self.assertEqual(
             set(registry.SOURCES),
             {
@@ -264,6 +308,7 @@ class SourceDeclarationConsistencyTest(unittest.TestCase):
                 "unpaywall",
                 "pubmed",
                 "clinicaltrials",
+                "pubchem",
             },
         )
 

@@ -5,6 +5,8 @@
   paper-radar evidence cite    --keyword "skin barrier" --min-confidence 70
   paper-radar trials  collect --query "sunscreen" --limit 100
   paper-radar trials  list    --keyword "sunscreen" --limit 20
+  paper-radar ingredient resolve --name "niacinamide"
+  paper-radar ingredient show    --name "niacinamide"
 
 evidence collect/trend 는 네트워크를 쓴다. evidence cite 는 로컬 DB 만 읽는다.
 플래그·출력 문구는 papers/cli.py 와 동일하게 맞췄다 — 사용자 눈에는 같은
@@ -55,7 +57,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from paper_radar.evidence import pipeline
-from paper_radar.sources import openalex
+from paper_radar.ingredients import resolve as ingredients_resolve
+from paper_radar.sources import openalex, pubchem
 from paper_radar.storage import repository
 from paper_radar.transport import warn
 from paper_radar.transport.http import Transport
@@ -193,6 +196,24 @@ def parse_args(argv):
     trials_list_parser.add_argument("--limit", type=int, default=20)
 
     for sub in (trials_collect_parser, trials_list_parser):
+        sub.add_argument("--db", default=DEFAULT_DB, help=argparse.SUPPRESS)
+
+    # ingredient: PubChem(T12)/CosIng(T13) 성분 실체 해소. trials 와 마찬가지로
+    # 완전히 별개의 저장 표면(ingredient 테이블)이라 별도 최상위 그룹으로 둔다.
+    ingredient = top.add_parser("ingredient", help="PubChem 성분 실체 해소")
+    ingredient_sub = ingredient.add_subparsers(dest="command", required=True)
+
+    ingredient_resolve_parser = ingredient_sub.add_parser(
+        "resolve", help="PubChem 이름 -> CID/CAS/동의어 조회·저장 (네트워크)"
+    )
+    ingredient_resolve_parser.add_argument("--name", required=True, help="성분 이름(영문)")
+
+    ingredient_show_parser = ingredient_sub.add_parser(
+        "show", help="저장된 성분 실체 조회 (로컬 전용)"
+    )
+    ingredient_show_parser.add_argument("--name", required=True, help="성분 이름(영문)")
+
+    for sub in (ingredient_resolve_parser, ingredient_show_parser):
         sub.add_argument("--db", default=DEFAULT_DB, help=argparse.SUPPRESS)
 
     return parser.parse_args(argv)
@@ -515,6 +536,57 @@ def _run_trials_list(args):
     return 0
 
 
+def _run_ingredient_resolve(args):
+    """`paper-radar ingredient resolve` — ingredients.resolve.run() 호출 -> 출력.
+
+    실제 조회·RunLog 자기기록은 ingredients.resolve.run() 이 한다(trials
+    collect 와 대칭). NotFound 는 run() 안에서 이미 흡수돼 report.record=None
+    으로 온다 — "PubChem 에 없는 이름"은 실패가 아니므로 exit 0(브리핑 지시).
+    """
+    conn = repository.connect(args.db)
+    try:
+        report = ingredients_resolve.run(conn, Transport(), args.name)
+    finally:
+        conn.close()
+
+    if report.record is None:
+        print("PubChem 에 없는 이름입니다")
+        return 0
+
+    record = report.record
+    print(f"저장 완료 -> {args.db}")
+    print(f"  name_key: {record.name_key}")
+    print(f"  CID: {record.cid}")
+    print(f"  CAS: {record.cas or '미상'}")
+    print(f"  동의어 {len(record.synonyms)}개")
+    print(f"  출처: {', '.join(record.sources)}")
+    return 0
+
+
+def _run_ingredient_show(args):
+    """`paper-radar ingredient show` — 로컬 DB 만 읽는다(네트워크 없음)."""
+    conn = repository.connect(args.db)
+    try:
+        record = repository.get_ingredient(conn, pubchem.name_key(args.name))
+    finally:
+        conn.close()
+
+    if record is None:
+        print("결과가 없습니다.")
+        return 0
+
+    preview = ", ".join(record.synonyms[:10])
+    more = f" 외 {len(record.synonyms) - 10}개" if len(record.synonyms) > 10 else ""
+    print(f"name_key: {record.name_key}")
+    print(f"  INCI: {record.inci_name or '미상(CosIng 미조인)'}")
+    print(f"  CID: {record.cid if record.cid is not None else '미상'}")
+    print(f"  CAS: {record.cas or '미상'}")
+    print(f"  동의어({len(record.synonyms)}개): {preview}{more}")
+    print(f"  출처: {', '.join(record.sources)}")
+    print(f"  갱신: {record.fetched_at}")
+    return 0
+
+
 COMMANDS = {"collect": _run_collect, "trend": _run_trend, "cite": _run_cite}
 TREND_COMMANDS = {
     "collect": _run_trend_collect,
@@ -524,7 +596,13 @@ TREND_COMMANDS = {
     "unmatched": _run_trend_unmatched,
 }
 TRIALS_COMMANDS = {"collect": _run_trials_collect, "list": _run_trials_list}
-GROUPS = {"evidence": COMMANDS, "trend": TREND_COMMANDS, "trials": TRIALS_COMMANDS}
+INGREDIENT_COMMANDS = {"resolve": _run_ingredient_resolve, "show": _run_ingredient_show}
+GROUPS = {
+    "evidence": COMMANDS,
+    "trend": TREND_COMMANDS,
+    "trials": TRIALS_COMMANDS,
+    "ingredient": INGREDIENT_COMMANDS,
+}
 
 
 def run(args):

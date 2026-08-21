@@ -35,18 +35,31 @@ import sqlite3
 from collections.abc import Iterable
 from dataclasses import fields
 
-from paper_radar.models import OaLocationRecord, RetractionRecord, TrialRecord
+from paper_radar.models import IngredientRecord, OaLocationRecord, RetractionRecord, TrialRecord
 from paper_radar.storage.schema import migrate
 
-# dataclass 레코드 타입 -> (테이블명, 병합정책). "overwrite" = 자연키 충돌 시
-# 전 컬럼을 excluded 값으로 무조건 갱신한다(papers.upsert() 의 COALESCE 병합과
-# 다르다) — 이런 레코드는 "최신 관측이 진실"이라, 과거 값과 섞으면 이미 사라진
-# 상태(예: 죽은 PDF 링크)가 영원히 남는다. 새 dataclass 레코드 타입을 추가하는
-# 태스크는 여기 항목 하나만 더하면 upsert_records() 가 자동으로 처리한다.
+# dataclass 레코드 타입 -> (테이블명, 병합정책).
+#
+# "overwrite" = 자연키 충돌 시 전 컬럼을 excluded 값으로 무조건 갱신한다
+# (papers.upsert() 의 COALESCE 병합과 다르다) — 이런 레코드는 "최신 관측이
+# 진실"이라, 과거 값과 섞으면 이미 사라진 상태(예: 죽은 PDF 링크)가 영원히
+# 남는다.
+#
+# "merge" = T12 가 신설한 두 번째 정책(IngredientRecord 가 첫 사례). 여러
+# 소스(PubChem, T13 의 CosIng)가 "같은 성분 실체"를 시차를 두고 채우는
+# 레코드에 쓴다 — overwrite 를 쓰면 나중에 upsert 되는 소스가 먼저 채워진
+# 값을 지워버린다(예: CosIng 이 inci_name 만 갖고 다시 upsert 하면 PubChem
+# 이 채운 cid/cas 가 NULL 로 덮인다). 스칼라 컬럼은 papers.upsert() 와 같은
+# COALESCE(excluded, 기존)로, JSON 배열 컬럼(synonyms/sources)은 합집합으로
+# 병합한다 — 자세한 규칙은 upsert_records() docstring 참고.
+#
+# 새 dataclass 레코드 타입을 추가하는 태스크는 여기 항목 하나만 더하면(정책은
+# "overwrite" 아니면 "merge") upsert_records() 가 자동으로 처리한다.
 TABLE_FOR: dict[type, tuple[str, str]] = {
     OaLocationRecord: ("oa_location", "overwrite"),
     RetractionRecord: ("retraction", "overwrite"),
     TrialRecord: ("trial", "overwrite"),
+    IngredientRecord: ("ingredient", "merge"),
 }
 
 # 스펙 8절 레코드 스키마 + is_retracted(버그 수정, 아래 public_record 참고).
@@ -375,10 +388,33 @@ def upsert_records(conn: sqlite3.Connection, records: Iterable) -> int:
     """models.py 의 frozen dataclass 레코드를 TABLE_FOR 매핑에 따라 upsert 한다.
 
     각 레코드 타입의 NATURAL_KEY(ClassVar[tuple[str, ...]])로 ON CONFLICT
-    절을 만든다. 정책이 "overwrite"(지금 등록된 유일한 정책)면 자연키가
-    충돌할 때 자연키가 아닌 모든 컬럼을 excluded 값으로 무조건 덮어쓴다 —
-    papers.upsert() 의 COALESCE 병합과 달리 옛 값을 지키지 않는다(이유는
-    TABLE_FOR 주석 참고: 이런 레코드는 "최신 관측이 곧 진실"이다).
+    절을 만든다. 정책은 두 가지다:
+
+    "overwrite" — 자연키가 충돌할 때 자연키가 아닌 모든 컬럼을 excluded
+    값으로 무조건 덮어쓴다 — papers.upsert() 의 COALESCE 병합과 달리 옛
+    값을 지키지 않는다(이유는 TABLE_FOR 주석 참고: 이런 레코드는 "최신
+    관측이 곧 진실"이다).
+
+    "merge" — T12 가 신설(IngredientRecord 가 첫 사례). 스칼라 컬럼은
+    COALESCE(excluded.col, table.col) 로 병합한다(새 값이 있으면 갱신,
+    없으면 보존) — SQL 만으로 충분하다. tuple 로 선언된 필드(JSON 배열
+    컬럼, 예: synonyms/sources)는 SQL COALESCE 로는 "합집합"을 표현할 수
+    없으므로, 이 함수가 먼저 기존 행을 SELECT 로 읽어 파이썬에서
+    (기존 순서 유지 + 새 항목을 뒤에 추가 + 중복 제거)로 병합한 뒤 그
+    결과를 INSERT 문의 값으로 넣는다 — 그래서 이 컬럼들은 excluded.col 을
+    그대로 쓰는 것처럼 보이지만 실제로는 이미 병합된 최종값이다. tuple
+    필드 여부는 이 함수가 아니라 각 레코드 인스턴스의 실제 값 타입으로
+    판별한다(dataclass 필드 순회, _record_row() 와 같은 방식) — 별도
+    레지스트리를 두지 않아도 새 tuple 필드를 models.py 에 추가하면 자동으로
+    병합 대상이 된다.
+
+    fetched_at 처럼 "항상 갱신"해야 하는 스칼라 컬럼도 COALESCE 로 처리한다
+    — IngredientRecord.fetched_at 은 항상 값이 채워진 채로 오므로(호출자가
+    None 을 주지 않는다) COALESCE(excluded, 기존) 는 사실상 "항상 새 값"과
+    동일하게 동작한다. 별도의 "ALWAYS" 컬럼 부류를 두지 않는 이유다.
+
+    알 수 없는 정책 문자열이면(오타 등으로 조용히 아무 갱신도 안 하는 SQL을
+    만들지 않기 위해) 즉시 ValueError 로 실패한다.
 
     등록되지 않은 타입을 만나면 KeyError(등록된 타입 이름 목록 포함).
     반환값은 upsert 한 레코드 수(records 를 소비한 개수, 실패 없이 전부
@@ -402,10 +438,7 @@ def upsert_records(conn: sqlite3.Connection, records: Iterable) -> int:
                 f"(TABLE_FOR 에 등록된 타입: {known})"
             )
         table, policy = TABLE_FOR[record_type]
-        if policy != "overwrite":
-            # 지금은 "overwrite" 하나뿐이다 — 새 정책이 필요해지면(예: papers 처럼
-            # 부분 병합) 여기 분기를 늘린다. 모르는 정책 문자열로 조용히 아무
-            # 갱신도 안 하는 SQL 을 만들지 않기 위해 즉시 실패한다.
+        if policy not in ("overwrite", "merge"):
             raise ValueError(f"upsert_records: 알 수 없는 병합 정책 {policy!r} ({table})")
 
         row = _record_row(record)
@@ -417,7 +450,35 @@ def upsert_records(conn: sqlite3.Connection, records: Iterable) -> int:
         names = ", ".join(columns)
         placeholders = ", ".join(":" + name for name in columns)
         conflict_columns = ", ".join(natural_key)
-        updates = ", ".join(f"{c}=excluded.{c}" for c in columns if c not in natural_key)
+
+        if policy == "overwrite":
+            updates = ", ".join(f"{c}=excluded.{c}" for c in columns if c not in natural_key)
+        else:  # "merge"
+            array_columns = {
+                field.name
+                for field in fields(record)
+                if isinstance(getattr(record, field.name), tuple)
+            }
+            where_clause = " AND ".join(f"{c} = :{c}" for c in natural_key)
+            existing = conn.execute(f"SELECT * FROM {table} WHERE {where_clause}", row).fetchone()
+            if existing is not None:
+                for column in array_columns:
+                    existing_list = json.loads(existing[column]) if existing[column] else []
+                    new_list = json.loads(row[column]) if row[column] else []
+                    # 순서: 기존 순서 유지 + 새 항목을 뒤에 + 중복 제거.
+                    # dict.fromkeys() 는 최초 등장 순서를 보존하며 중복을 없앤다.
+                    merged = list(dict.fromkeys(existing_list + new_list))
+                    row[column] = json.dumps(merged, ensure_ascii=False) if merged else None
+            scalar_columns = [
+                c for c in columns if c not in natural_key and c not in array_columns
+            ]
+            scalar_updates = ", ".join(
+                f"{c}=COALESCE(excluded.{c}, {table}.{c})" for c in scalar_columns
+            )
+            # 배열 컬럼은 위에서 이미 병합을 마친 최종값이 row 에 들어 있으므로
+            # excluded.col 을 그대로 쓴다(추가 COALESCE 가 필요 없다).
+            array_updates = ", ".join(f"{c}=excluded.{c}" for c in array_columns)
+            updates = ", ".join(part for part in (scalar_updates, array_updates) if part)
 
         conn.execute(
             f"INSERT INTO {table} ({names}) VALUES ({placeholders})"
@@ -499,3 +560,31 @@ def oa_pdf_urls(conn: sqlite3.Connection, dois: Iterable[str]) -> dict[str, str]
         doi_list,
     ).fetchall()
     return {row["doi"]: row["pdf_url"] for row in rows}
+
+
+def _ingredient_from_row(row) -> IngredientRecord:
+    """ingredient 테이블의 행 -> IngredientRecord. synonyms/sources 는 JSON
+    왕복한다(upsert_records()/_record_row() 의 반대 방향 변환)."""
+
+    def _tuple(value):
+        return tuple(json.loads(value)) if value else ()
+
+    return IngredientRecord(
+        name_key=row["name_key"],
+        inci_name=row["inci_name"],
+        cid=row["cid"],
+        cas=row["cas"],
+        synonyms=_tuple(row["synonyms"]),
+        sources=_tuple(row["sources"]),
+        fetched_at=row["fetched_at"],
+    )
+
+
+def get_ingredient(conn: sqlite3.Connection, name_key: str) -> IngredientRecord | None:
+    """name_key(sources.pubchem.name_key() 로 정규화된 값)로 ingredient 를
+    조회한다. cli.py 의 `ingredient show`(로컬 전용, 네트워크 없음)가 쓴다.
+    """
+    row = conn.execute(
+        "SELECT * FROM ingredient WHERE name_key = ?", (name_key,)
+    ).fetchone()
+    return _ingredient_from_row(row) if row is not None else None

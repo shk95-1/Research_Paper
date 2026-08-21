@@ -92,6 +92,7 @@ class MigrateOnAnEmptyDatabaseTest(unittest.TestCase):
                 "oa_location",
                 "retraction",
                 "trial",
+                "ingredient",
             },
         )
 

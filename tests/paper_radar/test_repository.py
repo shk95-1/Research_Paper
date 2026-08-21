@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import ClassVar
 from unittest import mock
 
-from paper_radar.models import OaLocationRecord, RetractionRecord, TrialRecord
+from paper_radar.models import IngredientRecord, OaLocationRecord, RetractionRecord, TrialRecord
 from paper_radar.storage import repository, runlog
 
 
@@ -815,6 +815,179 @@ class SearchTrialsTest(unittest.TestCase):
         repository.upsert_records(self.conn, [trial_record()])
         found = repository.search_trials(self.conn, "sunscreen")
         self.assertEqual(found[0], trial_record())
+
+
+def ingredient_record(**overrides):
+    base = {
+        "name_key": "niacinamide",
+        "inci_name": None,
+        "cid": 936,
+        "cas": "98-92-0",
+        "synonyms": ("niacinamide", "nicotinamide"),
+        "sources": ("pubchem",),
+        "fetched_at": "2026-08-21T00:00:00Z",
+    }
+    base.update(overrides)
+    return IngredientRecord(**base)
+
+
+class IngredientRecordMergeUpsertTest(unittest.TestCase):
+    """T12: IngredientRecord 를 ingredient 테이블에 저장. "merge" 정책(TABLE_FOR)
+    확인이 핵심 — PubChem 이 먼저 채우고 CosIng 류 소스가 나중에 upsert 해도
+    서로의 값을 지우지 않아야 한다(overwrite 정책과의 차이)."""
+
+    def setUp(self):
+        handle, self.path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        os.unlink(self.path)
+        self.conn = repository.connect(self.path)
+        self.addCleanup(self._cleanup)
+
+    def _cleanup(self):
+        self.conn.close()
+        if os.path.exists(self.path):
+            os.unlink(self.path)
+
+    def _row(self):
+        return self.conn.execute(
+            "SELECT * FROM ingredient WHERE name_key = 'niacinamide'"
+        ).fetchone()
+
+    def test_inserts_a_new_ingredient_row(self):
+        count = repository.upsert_records(self.conn, [ingredient_record()])
+        self.assertEqual(count, 1)
+        row = self._row()
+        self.assertEqual(row["cid"], 936)
+        self.assertEqual(row["cas"], "98-92-0")
+        self.assertEqual(json.loads(row["synonyms"]), ["niacinamide", "nicotinamide"])
+        self.assertEqual(json.loads(row["sources"]), ["pubchem"])
+
+    def test_a_later_upsert_that_only_knows_inci_name_does_not_erase_pubchem_fields(self):
+        """CosIng 류 두 번째 upsert 를 흉내낸다: inci_name 만 알고 cid/cas/
+        synonyms 는 모른다(None/빈 튜플) — 그래도 PubChem 이 채운 값이 남아야
+        한다(scalar COALESCE 병합)."""
+        repository.upsert_records(self.conn, [ingredient_record()])
+        repository.upsert_records(
+            self.conn,
+            [
+                ingredient_record(
+                    inci_name="NIACINAMIDE", cid=None, cas=None, synonyms=(), sources=("cosing",)
+                )
+            ],
+        )
+        row = self._row()
+        self.assertEqual(row["inci_name"], "NIACINAMIDE")
+        self.assertEqual(row["cid"], 936, "cid 는 pubchem 만 아는 값 — 보존돼야 한다")
+        self.assertEqual(row["cas"], "98-92-0")
+        self.assertEqual(json.loads(row["synonyms"]), ["niacinamide", "nicotinamide"])
+
+    def test_sources_accumulate_as_a_union_across_upserts(self):
+        repository.upsert_records(self.conn, [ingredient_record()])
+        repository.upsert_records(self.conn, [ingredient_record(sources=("cosing",))])
+        row = self._row()
+        self.assertEqual(json.loads(row["sources"]), ["pubchem", "cosing"])
+
+    def test_synonyms_union_keeps_existing_order_and_appends_new_ones(self):
+        repository.upsert_records(
+            self.conn, [ingredient_record(synonyms=("niacinamide", "nicotinamide"))]
+        )
+        repository.upsert_records(
+            self.conn, [ingredient_record(synonyms=("nicotinamide", "vitamin B3"))]
+        )
+        row = self._row()
+        self.assertEqual(
+            json.loads(row["synonyms"]), ["niacinamide", "nicotinamide", "vitamin B3"]
+        )
+
+    def test_a_new_scalar_value_overwrites_the_old_one(self):
+        repository.upsert_records(self.conn, [ingredient_record(cas="98-92-0")])
+        repository.upsert_records(self.conn, [ingredient_record(cas="59-67-6")])
+        self.assertEqual(self._row()["cas"], "59-67-6")
+
+    def test_fetched_at_always_reflects_the_latest_upsert(self):
+        repository.upsert_records(
+            self.conn, [ingredient_record(fetched_at="2026-01-01T00:00:00Z")]
+        )
+        repository.upsert_records(
+            self.conn, [ingredient_record(fetched_at="2026-08-21T00:00:00Z")]
+        )
+        self.assertEqual(self._row()["fetched_at"], "2026-08-21T00:00:00Z")
+
+    def test_conflicting_name_key_keeps_one_row(self):
+        repository.upsert_records(self.conn, [ingredient_record()])
+        repository.upsert_records(self.conn, [ingredient_record(inci_name="NIACINAMIDE")])
+        count = self.conn.execute("SELECT COUNT(*) FROM ingredient").fetchone()[0]
+        self.assertEqual(count, 1)
+
+
+class OverwritePolicyRegressionTest(unittest.TestCase):
+    """merge 정책을 upsert_records() 에 신설한 뒤에도 기존 "overwrite" 타입들의
+    동작이 그대로인지 확인하는 회귀 테스트 — TrialRecordUpsertTest/
+    RetractionRecordUpsertTest/UpsertRecordsTest(oa_location) 의 핵심 단언을
+    이 클래스 하나로 다시 모아, merge 분기 추가가 overwrite 분기를 건드리지
+    않았음을 한눈에 확인한다."""
+
+    def setUp(self):
+        handle, self.path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        os.unlink(self.path)
+        self.conn = repository.connect(self.path)
+        self.addCleanup(self._cleanup)
+
+    def _cleanup(self):
+        self.conn.close()
+        if os.path.exists(self.path):
+            os.unlink(self.path)
+
+    def test_oa_location_still_overwrites_rather_than_merges(self):
+        repository.upsert_records(self.conn, [oa_record()])
+        repository.upsert_records(
+            self.conn, [oa_record(pdf_url=None, landing_url=None, oa_status="closed")]
+        )
+        row = self.conn.execute("SELECT * FROM oa_location WHERE doi = '10.1/oa'").fetchone()
+        self.assertIsNone(row["pdf_url"], "overwrite 는 새 값이 None 이어도 옛 값을 지켜선 안 된다")
+        self.assertEqual(row["oa_status"], "closed")
+
+    def test_trial_still_overwrites_rather_than_merges(self):
+        repository.upsert_records(self.conn, [trial_record()])
+        repository.upsert_records(self.conn, [trial_record(phase=None, enrollment=None)])
+        row = self.conn.execute(
+            "SELECT * FROM trial WHERE nct_id = 'NCT01234567'"
+        ).fetchone()
+        self.assertIsNone(row["phase"])
+        self.assertIsNone(row["enrollment"])
+
+    def test_retraction_still_overwrites_rather_than_merges(self):
+        repository.upsert_records(self.conn, [retraction_record(update_type="retraction")])
+        repository.upsert_records(self.conn, [retraction_record(update_type="correction")])
+        row = self.conn.execute(
+            "SELECT * FROM retraction WHERE doi = '10.1/retracted'"
+        ).fetchone()
+        self.assertEqual(row["update_type"], "correction")
+
+
+class GetIngredientTest(unittest.TestCase):
+    """repository.get_ingredient() — `ingredient show`(로컬 전용) 가 쓰는 조회 헬퍼."""
+
+    def setUp(self):
+        handle, self.path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        os.unlink(self.path)
+        self.conn = repository.connect(self.path)
+        self.addCleanup(self._cleanup)
+
+    def _cleanup(self):
+        self.conn.close()
+        if os.path.exists(self.path):
+            os.unlink(self.path)
+
+    def test_returns_the_stored_record_faithfully(self):
+        repository.upsert_records(self.conn, [ingredient_record()])
+        got = repository.get_ingredient(self.conn, "niacinamide")
+        self.assertEqual(got, ingredient_record())
+
+    def test_returns_none_for_an_unknown_name_key(self):
+        self.assertIsNone(repository.get_ingredient(self.conn, "unknown-ingredient"))
 
 
 if __name__ == "__main__":
