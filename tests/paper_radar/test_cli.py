@@ -6,6 +6,7 @@ papers/tests/test_cli.py 의 collect/trend/cite 출력 케이스를 새 명령 �
 """
 
 import contextlib
+import csv
 import io
 import os
 import tempfile
@@ -161,6 +162,16 @@ class ParseArgsTest(unittest.TestCase):
     def test_ingredient_show_reads_the_name(self):
         args = cli.parse_args(["ingredient", "show", "--name", "niacinamide"])
         self.assertEqual(args.name, "niacinamide")
+
+    def test_ingredient_import_cosing_requires_a_path(self):
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            cli.parse_args(["ingredient", "import-cosing"])
+
+    def test_ingredient_import_cosing_reads_the_path(self):
+        args = cli.parse_args(
+            ["ingredient", "import-cosing", "--path", "data/reference/cosing/cosing.csv"]
+        )
+        self.assertEqual(args.path, "data/reference/cosing/cosing.csv")
 
     def test_no_command_under_ingredient_exits_with_usage(self):
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
@@ -754,6 +765,110 @@ class IngredientShowCliTest(unittest.TestCase):
         exit_code, text = self._show(["ingredient", "show", "--name", "unknown-ingredient"])
         self.assertEqual(exit_code, 0)
         self.assertIn("결과가 없습니다", text)
+
+
+_COSING_CSV_HEADER = (
+    "COSING Ref No",
+    "INCI name",
+    "INN name",
+    "CAS No",
+    "EC No",
+    "Chem/IUPAC Name / Description",
+    "Function",
+    "Restriction",
+    "Update Date",
+)
+
+
+def _cosing_row(**overrides):
+    base = dict.fromkeys(_COSING_CSV_HEADER, "")
+    base.update(overrides)
+    return base
+
+
+class IngredientImportCosingCliTest(unittest.TestCase):
+    """`ingredient import-cosing` — end-to-end(모킹 없음): 픽스처 CSV 를 실제로
+    읽어 실제 DB 에 merge upsert 한다. ingredients.import_cosing.run() 을
+    mock.patch 하지 않는다는 점이 IngredientResolveCliTest 와 다르다 — 브리핑
+    명세("cli import-cosing: 픽스처로 end-to-end")가 요구하는 검증 수준이라,
+    실제 merge 결과를 DB 에서 직접 확인한다."""
+
+    def setUp(self):
+        handle, self.db_path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        os.unlink(self.db_path)
+        self.addCleanup(lambda: os.path.exists(self.db_path) and os.unlink(self.db_path))
+
+        handle, self.csv_path = tempfile.mkstemp(suffix=".csv")
+        os.close(handle)
+        self.addCleanup(lambda: os.path.exists(self.csv_path) and os.unlink(self.csv_path))
+        with open(self.csv_path, "w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=_COSING_CSV_HEADER)
+            writer.writeheader()
+            writer.writerows(
+                [
+                    _cosing_row(
+                        **{
+                            "INCI name": "NIACINAMIDE",
+                            "INN name": "Niacinamide",
+                            "CAS No": "98-92-0",
+                        }
+                    ),
+                    _cosing_row(**{"INCI name": "RETINOL", "CAS No": "68-26-8"}),
+                    _cosing_row(**{"CAS No": "9999-99-9"}),  # INCI name 없음 -> 건너뜀
+                ]
+            )
+
+    def _import(self, argv):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            exit_code = cli.run(cli.parse_args(argv + ["--db", self.db_path]))
+        return exit_code, output.getvalue()
+
+    def test_prints_read_saved_and_skipped_counts(self):
+        exit_code, text = self._import(
+            ["ingredient", "import-cosing", "--path", self.csv_path]
+        )
+        self.assertEqual(exit_code, 0)
+        self.assertIn("읽은 행: 3건", text)
+        self.assertIn("저장한 레코드: 2건", text)
+        self.assertIn("건너뛴 행: 1건", text)
+
+    def test_merges_into_a_pre_existing_pubchem_record(self):
+        """pubchem 이 먼저 채운 niacinamide 에 CosIng 이 합류하면 inci_name/
+        cas 는 채워지고 sources 는 합집합이 된다 — cid(PubChem 만 아는 값)는
+        지워지지 않는다(T12 merge 정책, 브리핑의 "T13·T14 용 요약" 참고)."""
+        conn = repository.connect(self.db_path)
+        repository.upsert_records(conn, [ingredient_record()])  # sources=("pubchem",), cid=936
+        conn.close()
+
+        exit_code, _ = self._import(["ingredient", "import-cosing", "--path", self.csv_path])
+        self.assertEqual(exit_code, 0)
+
+        conn = repository.connect(self.db_path)
+        try:
+            merged = repository.get_ingredient(conn, "niacinamide")
+        finally:
+            conn.close()
+        self.assertEqual(merged.inci_name, "NIACINAMIDE")
+        self.assertEqual(merged.cid, 936, "PubChem 이 채운 cid 는 보존돼야 한다")
+        self.assertEqual(merged.cas, "98-92-0")
+        self.assertEqual(set(merged.sources), {"pubchem", "cosing"})
+
+    def test_inserts_a_brand_new_ingredient_row_when_pubchem_never_saw_it(self):
+        exit_code, _ = self._import(["ingredient", "import-cosing", "--path", self.csv_path])
+        self.assertEqual(exit_code, 0)
+
+        conn = repository.connect(self.db_path)
+        try:
+            retinol = repository.get_ingredient(conn, "retinol")
+        finally:
+            conn.close()
+        self.assertIsNotNone(retinol)
+        self.assertEqual(retinol.inci_name, "RETINOL")
+        self.assertEqual(retinol.cas, "68-26-8")
+        self.assertIsNone(retinol.cid, "CosIng 은 CID 를 모른다")
+        self.assertEqual(retinol.sources, ("cosing",))
 
 
 if __name__ == "__main__":

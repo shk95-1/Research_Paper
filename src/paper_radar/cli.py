@@ -5,8 +5,9 @@
   paper-radar evidence cite    --keyword "skin barrier" --min-confidence 70
   paper-radar trials  collect --query "sunscreen" --limit 100
   paper-radar trials  list    --keyword "sunscreen" --limit 20
-  paper-radar ingredient resolve --name "niacinamide"
-  paper-radar ingredient show    --name "niacinamide"
+  paper-radar ingredient resolve       --name "niacinamide"
+  paper-radar ingredient show          --name "niacinamide"
+  paper-radar ingredient import-cosing --path data/reference/cosing/cosing.csv
 
 evidence collect/trend 는 네트워크를 쓴다. evidence cite 는 로컬 DB 만 읽는다.
 플래그·출력 문구는 papers/cli.py 와 동일하게 맞췄다 — 사용자 눈에는 같은
@@ -57,6 +58,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from paper_radar.evidence import pipeline
+from paper_radar.ingredients import import_cosing as ingredients_import_cosing
 from paper_radar.ingredients import resolve as ingredients_resolve
 from paper_radar.sources import openalex, pubchem
 from paper_radar.storage import repository
@@ -213,7 +215,21 @@ def parse_args(argv):
     )
     ingredient_show_parser.add_argument("--name", required=True, help="성분 이름(영문)")
 
-    for sub in (ingredient_resolve_parser, ingredient_show_parser):
+    # import-cosing: T13 — CosIng CSV(사람이 tool/fetch_cosing.py 로 미리 받아
+    # 둔 파일)를 읽어 ingredient 테이블에 merge upsert 한다. 로컬 전용(네트워크
+    # 없음) — trials list/ingredient show 와 같은 부류.
+    ingredient_import_cosing_parser = ingredient_sub.add_parser(
+        "import-cosing", help="CosIng CSV 임포트 -> INCI/CAS 조인 (로컬 전용)"
+    )
+    ingredient_import_cosing_parser.add_argument(
+        "--path", required=True, help="tool/fetch_cosing.py 가 받아 둔 cosing.csv 경로"
+    )
+
+    for sub in (
+        ingredient_resolve_parser,
+        ingredient_show_parser,
+        ingredient_import_cosing_parser,
+    ):
         sub.add_argument("--db", default=DEFAULT_DB, help=argparse.SUPPRESS)
 
     return parser.parse_args(argv)
@@ -587,6 +603,26 @@ def _run_ingredient_show(args):
     return 0
 
 
+def _run_ingredient_import_cosing(args):
+    """`paper-radar ingredient import-cosing` — ingredients.import_cosing.run() 호출 -> 출력.
+
+    실제 파싱·merge upsert·RunLog 자기기록은 ingredients.import_cosing.run()
+    이 한다(ingredient resolve/trials collect 와 대칭). 네트워크가 없으므로
+    Transport 를 만들지 않는다.
+    """
+    conn = repository.connect(args.db)
+    try:
+        report = ingredients_import_cosing.run(conn, args.path)
+    finally:
+        conn.close()
+
+    print(f"CosIng 임포트 완료: {args.path} -> {args.db}")
+    print(f"  읽은 행: {report.read}건")
+    print(f"  저장한 레코드: {report.saved}건")
+    print(f"  건너뛴 행: {report.skipped}건 (INCI name 없음)")
+    return 0
+
+
 COMMANDS = {"collect": _run_collect, "trend": _run_trend, "cite": _run_cite}
 TREND_COMMANDS = {
     "collect": _run_trend_collect,
@@ -596,7 +632,11 @@ TREND_COMMANDS = {
     "unmatched": _run_trend_unmatched,
 }
 TRIALS_COMMANDS = {"collect": _run_trials_collect, "list": _run_trials_list}
-INGREDIENT_COMMANDS = {"resolve": _run_ingredient_resolve, "show": _run_ingredient_show}
+INGREDIENT_COMMANDS = {
+    "resolve": _run_ingredient_resolve,
+    "show": _run_ingredient_show,
+    "import-cosing": _run_ingredient_import_cosing,
+}
 GROUPS = {
     "evidence": COMMANDS,
     "trend": TREND_COMMANDS,
