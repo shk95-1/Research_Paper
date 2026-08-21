@@ -282,7 +282,7 @@ def _run_trend_collect(args):
     프로파일별로 trend.collect.run() 을 호출한다 — 실제 수집·RunLog 기록은
     거기서 한다. 여기서는 인자 해석과 출력만.
     """
-    config = trend_collect.load_config(args.config) if args.config else trend_collect.load_config()
+    config = trend_collect.load_config(args.config or trend_collect.CONFIG_PATH)
     profiles = config["profiles"]
     wanted = list(profiles) if args.profile == "all" else [args.profile]
     unknown = [name for name in wanted if name not in profiles]

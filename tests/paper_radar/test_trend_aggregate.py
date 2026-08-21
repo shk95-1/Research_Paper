@@ -10,6 +10,8 @@ run() 이 out_dir/{query_id}/ 네임스페이스에 쓰는지, _PROVISIONAL_CACH
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import tempfile
 import unittest
@@ -170,6 +172,20 @@ class FixtureCase(unittest.TestCase):
 
     def test_census_error_is_a_value_error(self):
         self.assertTrue(issubclass(aggregate.CensusError, ValueError))
+
+    def test_allow_sample_passes_through_a_non_census_profile_with_a_warning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._records.NEW_RAW_ROOT = Path(tmp)
+            profile_dir = Path(tmp) / "openalex" / "sample_only"
+            profile_dir.mkdir(parents=True)
+            with open(profile_dir / "_meta.json", "w", encoding="utf-8") as handle:
+                json.dump({"is_census": False, "collected": 5, "expected_from_api": 500}, handle)
+
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                meta = aggregate.census_guard("sample_only", allow_sample=True)
+        self.assertEqual(meta["collected"], 5)
+        self.assertIn("모집단 비율이 아닙니다", stderr.getvalue())
 
     def test_module_no_longer_holds_a_global_provisional_cache(self):
         # T6: _PROVISIONAL_CACHE 모듈 전역 제거. _is_provisional_month() 는 이제

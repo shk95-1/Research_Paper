@@ -356,6 +356,11 @@ def _fetch_profile(query_id, query, config, transport, *, provider, verbose, max
             " 비율 지표를 모집단 비율로 해석하지 말 것."
         ),
         "collected_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        # legacy 필드 그대로 유지(브리핑: "_meta.json 필드 전부 기존과 동일"). OpenAlex
+        # 응답 구조를 실측 확인한 날짜 — 이 값 자체를 재계산하지 않는다. 응답 구조가
+        # 바뀌었다고 판단되면 새로 실측하고 이 상수를 갱신할 것(collect_openalex.py
+        # 상단 주석의 실측 기록과 같은 근거).
+        "openalex_fields_verified_on": "2026-08-20",
     }
     write_meta(query_id, meta, provider)
     if verbose:
