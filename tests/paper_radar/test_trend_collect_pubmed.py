@@ -7,6 +7,8 @@ tests/paper_radar/test_trend_collect.py 와 같은 방식(FakeSession -> Transpo
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import sqlite3
 import tempfile
@@ -199,6 +201,114 @@ class BatchSplitTest(_CollectPubmedTestCase):
         self.assertEqual(len(session.calls), 3)
         self.assertEqual(session.calls[1]["params"]["id"].count(","), 199)  # 200개
         self.assertEqual(session.calls[2]["params"]["id"].count(","), 49)  # 50개
+
+
+class MidPageFailureResumeTest(_CollectPubmedTestCase):
+    """리뷰 Finding 1 회귀 테스트: 한 esearch 페이지(500개 이내)가 여러 efetch
+    청크(200개씩)로 나뉠 때, 청크 중간에 실패해도 그 페이지의 retstart 를
+    전진시키지 않는다 — 그래서 재실행이 같은 페이지를 다시 esearch 하고,
+    사이드카 dedup 덕에 이미 받은 청크는 재요청하지 않으면서 실패/미시도
+    청크만 재시도해 결국 census 를 완성한다(수정 전에는 실패 청크의 PMID
+    가 영원히 재시도되지 않아 expected > collected+duplicates 가 고착됐다).
+    """
+
+    def test_a_chunk_failure_mid_page_does_not_advance_retstart_and_a_rerun_completes_the_census(
+        self,
+    ):
+        pmids = [str(n) for n in range(1, 251)]  # 250건 -> efetch 청크 200 + 50
+
+        # 1차: esearch 로 250개를 받고, 첫 청크(200)는 성공, 두 번째 청크(50)에서
+        # 예산 소진.
+        transport1, session1 = self._transport(
+            [_esearch(pmids, 250), _efetch(pmids[:200]), FakeResponse(402)]
+        )
+        _, run_log = self._run_log()
+        meta1 = collect_pubmed.collect_profile(
+            "demo", "demo", self.config, transport1, run_log, verbose=False
+        )
+        self.assertEqual(meta1["stopped_reason"], "budget_exhausted")
+        self.assertEqual(meta1["collected"], 200)  # 첫 청크만 반영
+        self.assertFalse(meta1["is_census"])
+
+        state = collect_pubmed.load_state("demo")
+        self.assertEqual(state["month_cursor"], "2024-01")
+        # 핵심 검증: retstart 가 전진하지 않았다(0 그대로) — 페이지 전체를 다시 esearch 한다.
+        self.assertEqual(state["retstart"], 0)
+
+        # 2차: 같은 페이지를 다시 esearch(같은 250개 응답). 이미 받은 200개는
+        # already(사이드카)에 걸려 새 efetch 대상에서 빠지고, 나머지 50개만
+        # 청크 하나로 재시도된다.
+        transport2, session2 = self._transport([_esearch(pmids, 250), _efetch(pmids[200:])])
+        meta2 = collect_pubmed.collect_profile(
+            "demo", "demo", self.config, transport2, run_log, verbose=False
+        )
+        self.assertIsNone(meta2["stopped_reason"])
+        self.assertEqual(meta2["collected"], 250)  # 누적 — 이번에 나머지 50건이 채워졌다
+        self.assertTrue(meta2["is_census"])
+        # esearch 1회 + efetch 1회(남은 50개) = 2 요청. 이미 성공한 200개 청크를
+        # 다시 efetch 하지 않았다는 것도 이 호출 수로 확인된다.
+        self.assertEqual(len(session2.calls), 2)
+        self.assertEqual(session2.calls[1]["params"]["id"].count(","), 49)  # 50개
+
+        lines = self._jsonl_lines()
+        self.assertEqual(len(lines), 250)  # 200 + 50, 중복 기록 없음
+        self.assertEqual(len({line["pmid"] for line in lines}), 250)
+
+
+class WindowExtensionAfterCompletionTest(_CollectPubmedTestCase):
+    """리뷰 Finding 2 회귀 테스트: 전 구간을 이미 완료한 뒤 window.to 를
+    늘려(가장 흔한 운영 행위) 재실행하면, 이미 끝낸 달은 다시 esearch 하지
+    않고 새로 늘어난 달만 수집해 census 를 유지한다.
+    """
+
+    def test_extending_the_window_after_a_completed_census_only_collects_the_new_month(self):
+        self.config["window"] = {"from": "2024-01-01", "to": "2024-02-29"}
+        transport1, session1 = self._transport(
+            [_esearch(["1"], 1), _efetch(["1"]), _esearch(["2"], 1), _efetch(["2"])]
+        )
+        _, run_log = self._run_log()
+        meta1 = collect_pubmed.collect_profile(
+            "demo", "demo", self.config, transport1, run_log, verbose=False
+        )
+        self.assertTrue(meta1["is_census"])
+        state = collect_pubmed.load_state("demo")
+        self.assertTrue(state["complete"])
+        self.assertEqual(state["complete_through_month"], "2024-02")
+
+        # window.to 를 3월까지 늘린다 — Jan/Feb 는 다시 esearch 하지 않아야 한다
+        # (응답 목록에 3월분만 넣는다 — FakeSession 이 예상보다 많이 불리면 실패한다).
+        self.config["window"]["to"] = "2024-03-31"
+        transport2, session2 = self._transport([_esearch(["3"], 1), _efetch(["3"])])
+        meta2 = collect_pubmed.collect_profile(
+            "demo", "demo", self.config, transport2, run_log, verbose=False
+        )
+
+        self.assertEqual(meta2["months_this_run"], 1)  # 3월 하나만 처리
+        self.assertEqual(set(meta2["months"]), {"2024-01", "2024-02", "2024-03"})
+        self.assertTrue(meta2["is_census"])
+        self.assertEqual(len(session2.calls), 2)  # esearch 1 + efetch 1 (3월분만)
+
+        state2 = collect_pubmed.load_state("demo")
+        self.assertTrue(state2["complete"])
+        self.assertEqual(state2["complete_through_month"], "2024-03")
+
+    def test_extending_the_window_prints_a_warning(self):
+        self.config["window"] = {"from": "2024-01-01", "to": "2024-01-31"}
+        transport1, _ = self._transport([_esearch(["1"], 1), _efetch(["1"])])
+        _, run_log = self._run_log()
+        collect_pubmed.collect_profile(
+            "demo", "demo", self.config, transport1, run_log, verbose=False
+        )
+
+        self.config["window"]["to"] = "2024-02-29"
+        transport2, _ = self._transport([_esearch(["2"], 1), _efetch(["2"])])
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            collect_pubmed.collect_profile(
+                "demo", "demo", self.config, transport2, run_log, verbose=False
+            )
+        self.assertIn("window", stderr.getvalue())
+        self.assertIn("늘어났습니다", stderr.getvalue())
 
 
 class SidecarDedupTest(_CollectPubmedTestCase):

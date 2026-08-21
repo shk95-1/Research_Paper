@@ -152,8 +152,12 @@ def jsonl_path(query_id, stamp=None):
     return profile_dir(query_id) / f"{stamp}.jsonl"
 
 
+def _initial_state():
+    return {"month_cursor": None, "retstart": 0, "complete": False, "complete_through_month": None}
+
+
 def load_state(query_id):
-    """월 커서: {"month_cursor": "YYYY-MM" 또는 None, "retstart": int, "complete": bool}.
+    """월 커서: {"month_cursor", "retstart", "complete", "complete_through_month"}.
 
     month_cursor 는 "다음(또는 진행 중인) 달"을 가리킨다. retstart 는 그 달
     안에서 이미 받은 개수(재개 시 esearch 의 retstart 로 그대로 쓴다).
@@ -165,16 +169,25 @@ def load_state(query_id):
     (사이드카 덕에 결과 자체는 틀리지 않지만, 필요 없는 요청을 매번 반복
     한다). complete=True 면 `_fetch_profile()` 이 아무 달도 처리하지 않고
     바로 넘어간다.
+
+    complete_through_month 는 complete=True 를 만든 시점의 마지막 달
+    (그때의 config.window 기준 months[-1])이다(리뷰 대응, Finding 2) —
+    window.to 를 늘려 재수집(가장 흔한 운영 행위)하면 새 months[-1] 이
+    이 값과 달라지므로, `_fetch_profile()` 이 "창이 늘었다"를 감지해
+    complete 를 해제하고 새로 늘어난 꼬리 달부터만 재개한다(기존 커서
+    분기가 창이 바뀐 경우를 warn+리셋으로 다루는 것과 같은 방향).
     """
     path = state_path(query_id)
     if not path.exists():
-        return {"month_cursor": None, "retstart": 0, "complete": False}
+        return _initial_state()
     try:
         with open(path, encoding="utf-8") as handle:
-            return json.load(handle)
+            state = json.load(handle)
     except OSError, ValueError:
         warn(f"{query_id}: pubmed 상태 파일을 읽을 수 없어 처음부터 시작합니다")
-        return {"month_cursor": None, "retstart": 0, "complete": False}
+        return _initial_state()
+    state.setdefault("complete_through_month", None)  # 이 필드 도입 이전 상태 파일 하위호환
+    return state
 
 
 def save_state(query_id, state):
@@ -237,7 +250,9 @@ def _fetch_month(query_id, query, month, window, transport, already, handle, *, 
     반환: (expected, collected, duplicates, next_retstart, stopped_reason).
     expected 는 이 달의 esearch count(조회 실패 시 None). stopped_reason 은
     "budget_exhausted" 또는 "transport_error"(429 재시도 소진 등 그 외
-    transport 오류) 또는 None(이 달을 끝까지 받았다).
+    transport 오류) 또는 None(이 달을 끝까지 받았다). stopped_reason 이 있으면
+    next_retstart 는 실패한 esearch 페이지가 시작한 retstart 그대로다(전진
+    시키지 않는다 — 아래 루프 안의 주석 참고, Finding 1 대응).
     """
     mindate, maxdate = month_bounds(month, window)
     expected = None
@@ -306,9 +321,21 @@ def _fetch_month(query_id, query, month, window, transport, already, handle, *, 
                 _append_pmid(query_id, pmid)
                 collected += 1
 
-        retstart += len(pmids)
         if stopped_reason:
+            # 리뷰 대응(Finding 1): retstart 를 전진시키지 않는다. 한 esearch
+            # 페이지(최대 500개)가 여러 efetch 청크(200개씩)로 나뉘는데, 청크
+            # 중간에 실패하면 그 청크와 그 뒤 미시도 청크의 PMID 는 이번 실행에서
+            # 전혀 못 받은 것이다. retstart 를 전진시켜 버리면 다음 실행이 이
+            # 페이지를 건너뛰어 그 PMID 들을 영원히 재시도하지 못하고, 그 달의
+            # expected(esearch count) > collected(저장된 고유 PMID 수) 가
+            # 고착돼 is_census 가 영영 False 로 남는다. retstart 를 그대로 두면 다음
+            # 실행이 **같은 페이지를 처음부터 다시** esearch 하지만, 사이드카
+            # (`_ids.txt`) 에 이미 실려 있는 PMID 는 `already` 로 걸러져
+            # efetch 를 다시 보내지 않는다(멱등) — 그래서 이미 성공한 청크는
+            # 반복 요청 없이, 실패/미시도 청크만 실제로 재시도된다.
             break
+
+        retstart += len(pmids)
         if retstart >= count or len(pmids) < ESEARCH_PAGE:
             break
 
@@ -339,9 +366,31 @@ def _fetch_profile(query_id, query, config, transport, *, verbose, max_months):
 
     cursor = state.get("month_cursor")
     if state.get("complete"):
-        # 이미 전 구간을 끝냈다 — 아무 달도 다시 처리하지 않는다(load_state()
-        # docstring의 "complete 를 별도 필드로 두는 이유" 참고).
-        start_index = len(months)
+        completed_through = state.get("complete_through_month")
+        if months and completed_through == months[-1]:
+            # 같은 창을 이미 끝냈다 — 아무 달도 다시 처리하지 않는다(load_state()
+            # docstring의 "complete 를 별도 필드로 두는 이유" 참고).
+            start_index = len(months)
+        else:
+            # 리뷰 대응(Finding 2): 완료 시점의 마지막 달(complete_through_month)
+            # 이 현재 window 의 마지막 달과 다르다 — window.to 연장(가장 흔한
+            # 운영 행위)으로 새 달이 늘어났다는 뜻이다. complete 를 해제하고,
+            # 완료 시점 다음 달부터만 재개한다(완료된 달을 다시 esearch 하지
+            # 않는다). completed_through 가 지금 months 목록에 아예 없으면
+            # (window.from 도 바뀌는 등 더 근본적인 변경) 안전하게 처음부터
+            # 다시 시작한다 — 저장된 커서를 못 찾을 때의 기존 처리와 같은 원칙.
+            warn(
+                f"{query_id}: window 가 늘어났습니다"
+                f"({completed_through or '?'} 까지 완료 -> 새 창 끝"
+                f" {months[-1] if months else '?'}). 전 구간 완료 표시를 해제하고"
+                " 새로 늘어난 달부터 이어서 수집합니다."
+            )
+            state["complete"] = False
+            start_index = months.index(completed_through) + 1 if completed_through in months else 0
+            cursor = months[start_index] if start_index < len(months) else None
+            state["month_cursor"] = cursor
+            state["retstart"] = 0
+            save_state(query_id, state)
     elif cursor:
         try:
             start_index = months.index(cursor)
@@ -407,6 +456,10 @@ def _fetch_profile(query_id, query, config, transport, *, verbose, max_months):
             state["month_cursor"] = next_month
             state["retstart"] = 0
             state["complete"] = next_month is None
+            if next_month is None:
+                # 이 창의 마지막 달을 방금 끝냈다 — 다음 실행이 window.to 연장
+                # 여부를 판단할 기준값(Finding 2, load_state() docstring 참고).
+                state["complete_through_month"] = month
             save_state(query_id, state)
 
     all_months_done = state.get("complete", False)
@@ -416,11 +469,21 @@ def _fetch_profile(query_id, query, config, transport, *, verbose, max_months):
     expected_total = sum(m.get("expected") or 0 for m in months_meta.values())
     collected_total = sum(m.get("collected", 0) for m in months_meta.values())
     duplicates_total = sum(m.get("duplicates", 0) for m in months_meta.values())
-    is_census = (
-        all_months_done
-        and all_expected_known
-        and not stopped_early
-        and expected_total == collected_total + duplicates_total
+    # census 판정은 expected_total == collected_total 로만 본다 —
+    # duplicates_total 을 더하지 않는다(리뷰 대응, Finding 1 수정의 파생
+    # 버그). months_meta[month]["collected"] 는 이미 실행을 거듭할 때마다
+    # `prior.get("collected") + 이번 실행의 신규 건수`로 누적되므로, 그
+    # 자체가 "이 달에 실제로 저장된 고유 PMID 총수"다. 반면
+    # months_meta[month]["duplicates"] 는 "이번 esearch 페이지 재시도에서
+    # 이미 알고 있던(already) PMID 로 다시 걸린 횟수"인데, retstart 를
+    # 전진시키지 않는 재시도 설계(Finding 1) 상 같은 페이지를 여러 번
+    # 재시도하면 그때마다 이미 collected_total 에 반영된 바로 그 PMID 들이
+    # "새로운 duplicates" 로 또 잡혀 누적된다 — collected_total 과
+    # duplicates_total 을 더하면 같은 PMID 를 이중으로 센다. duplicates_total
+    # 은 그래서 census 등식에서 빼고, 진단용 참고값(meta 의
+    # duplicates_skipped)으로만 남긴다.
+    is_census = all_months_done and all_expected_known and not stopped_early and (
+        expected_total == collected_total
     )
     stopped_reason = determine_stopped_reason(
         budget_exhausted=budget_exhausted, hit_max_months=hit_max_months
@@ -446,16 +509,20 @@ def _fetch_profile(query_id, query, config, transport, *, verbose, max_months):
         "is_census": is_census,
         "census_note": (
             "전수. window 안의 모든 달을 완료했고, 각 달의 esearch count 합이"
-            " 수집·중복 합과 일치한다."
+            " 실제 저장된 고유 PMID 수 합과 일치한다."
             if is_census
             else "표본 또는 미완. window 의 일부 달만 수집됐거나 중단됐다면"
             " 아직 전수가 아니다. prevalence 를 모집단 비율로 해석하지 말 것."
         ),
         "collected_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        # PubMed E-utilities esearch/efetch 응답 구조를 실측 확인한 날짜. 응답
-        # 구조가 바뀌었다고 판단되면 새로 실측하고 이 상수를 갱신할 것
-        # (sources/pubmed.py 모듈 docstring, tool/live_smoke.py 참고).
-        "pubmed_fields_verified_on": "2026-08-21",
+        # 리뷰 대응(minor): 이 태스크(T15)는 월별 esearch(mindate/maxdate/
+        # retstart)·배치 efetch 경로를 실제 네트워크로 검증하지 않았다(전부
+        # FakeSession — tool/live_smoke.py 에 스모크 테스트는 "작성"만 했다,
+        # 브리핑 제약). "실측 확인한 날짜"라는 상수를 미검증 상태로 박아두면
+        # 오해를 부르므로 None 으로 둔다 — `uv run python tool/live_smoke.py`
+        # 를 실제로 돌려 이 경로(mindate/maxdate 페이지네이션, 배치 efetch)가
+        # 통과한 날짜를 그때 사람이 채워 넣을 것.
+        "pubmed_fields_verified_on": None,
     }
     write_meta(query_id, meta)
     if verbose:
