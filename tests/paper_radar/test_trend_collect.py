@@ -64,6 +64,32 @@ class DetermineStoppedReasonTest(unittest.TestCase):
             "budget_exhausted",
         )
 
+    def test_is_transport_error_when_a_transport_error_stopped_the_run(self):
+        # 리뷰 대응(Finding 1): TransportError 중단도 stopped_reason 을 남겨야
+        # RunLog 상태/CLI exit 코드가 정상 완료와 구분된다.
+        self.assertEqual(
+            collect.determine_stopped_reason(
+                budget_exhausted=False, transport_error=True, hit_max_pages=False
+            ),
+            "transport_error",
+        )
+
+    def test_budget_exhausted_wins_over_transport_error(self):
+        self.assertEqual(
+            collect.determine_stopped_reason(
+                budget_exhausted=True, transport_error=True, hit_max_pages=False
+            ),
+            "budget_exhausted",
+        )
+
+    def test_transport_error_wins_over_max_pages(self):
+        self.assertEqual(
+            collect.determine_stopped_reason(
+                budget_exhausted=False, transport_error=True, hit_max_pages=True
+            ),
+            "transport_error",
+        )
+
 
 class _CollectTestCase(unittest.TestCase):
     def setUp(self):
@@ -196,6 +222,24 @@ class BudgetAndMaxPagesTest(_CollectTestCase):
         )
         self.assertEqual(meta["stopped_reason"], "max_pages")
         self.assertEqual(meta["pages_this_run"], 1)
+
+    def test_a_transport_error_mid_run_reports_transport_error_and_a_partial_run(self):
+        """리뷰 대응(Finding 1): 페이지 수집 중 TransportError(예: 5xx 재시도
+        소진)로 멈춰도 이전에는 stopped_reason 이 None 이 되어 RunLog 상태가
+        "ok", CLI exit 코드가 0 으로 기록됐다 — README 의 exit-code 규약
+        ("수집이 중간에 멈추면 exit 1")과 어긋났다. 5xx 를 max_attempts(5)회
+        반복시켜 TransientError(TransportError 의 하위클래스)를 유발한다."""
+        transport = self._transport([_count(10), *[FakeResponse(503) for _ in range(5)]])
+        conn, run_log = self._run_log()
+        meta = collect.collect_profile(
+            "demo", "demo", self.config, transport, run_log, verbose=False
+        )
+        self.assertEqual(meta["stopped_reason"], "transport_error")
+        self.assertFalse(meta["is_census"])
+        status = conn.execute("select status from run").fetchone()
+        self.assertEqual(status, ("partial",))
+        source_reason = conn.execute("select stopped_reason from run_source").fetchone()
+        self.assertEqual(source_reason, ("transport_error",))
 
 
 class RunLogWiringTest(_CollectTestCase):

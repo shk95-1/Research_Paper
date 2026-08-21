@@ -81,16 +81,22 @@ def load_config(path=CONFIG_PATH):
         return json.load(handle)
 
 
-def determine_stopped_reason(*, budget_exhausted, hit_max_months):
+def determine_stopped_reason(*, budget_exhausted, transport_error=False, hit_max_months):
     """중단 사유를 우선순위대로 정한다. 정상 완료(또는 그 외 실패)면 None. (순수 함수)
 
     trend/collect.py 의 determine_stopped_reason() 과 같은 우선순위 규칙
-    (예산 소진이 상한 도달보다 앞선다)이되, 단위가 페이지가 아니라 달이라
-    별도 함수로 둔다 — collect.py 의 함수를 hit_max_pages= 라는 이름으로
-    호출하면 pubmed 컨텍스트에서 "페이지"라는 말 자체가 오해를 부른다.
+    (예산 소진 > transport 오류 > 상한 도달)이되, 단위가 페이지가 아니라
+    달이라 별도 함수로 둔다 — collect.py 의 함수를 hit_max_pages= 라는
+    이름으로 호출하면 pubmed 컨텍스트에서 "페이지"라는 말 자체가 오해를
+    부른다. 리뷰 대응(Finding 1): _fetch_month() 가 이미 "transport_error"
+    를 반환했는데도 이전에는 이 함수가 그 값을 몰라 결과적으로 stopped_reason
+    이 None(정상 완료)이 되고, RunLog 상태 "ok"/CLI exit 0 으로 잘못
+    기록됐다 — collect.py 와 같은 인자를 추가해 바로잡는다.
     """
     if budget_exhausted:
         return "budget_exhausted"
+    if transport_error:
+        return "transport_error"
     if hit_max_months:
         return "max_months"
     return None
@@ -406,6 +412,7 @@ def _fetch_profile(query_id, query, config, transport, *, verbose, max_months):
     months_this_run = 0
     stopped_early = False
     budget_exhausted = False
+    transport_error = False
     hit_max_months = False
 
     with open(path, "a", encoding="utf-8") as handle:
@@ -442,6 +449,10 @@ def _fetch_profile(query_id, query, config, transport, *, verbose, max_months):
             if reason:
                 stopped_early = True
                 budget_exhausted = reason == "budget_exhausted"
+                # 리뷰 대응(Finding 1): reason 이 "transport_error"일 때 이전에는
+                # 이 값을 버렸다(budget_exhausted 만 봤다) — determine_stopped_reason()
+                # 이 결국 None 을 돌려줘 RunLog "ok"/CLI exit 0 으로 잘못 기록됐다.
+                transport_error = reason == "transport_error"
                 state["month_cursor"] = month
                 state["retstart"] = next_retstart
                 save_state(query_id, state)
@@ -486,7 +497,9 @@ def _fetch_profile(query_id, query, config, transport, *, verbose, max_months):
         expected_total == collected_total
     )
     stopped_reason = determine_stopped_reason(
-        budget_exhausted=budget_exhausted, hit_max_months=hit_max_months
+        budget_exhausted=budget_exhausted,
+        transport_error=transport_error,
+        hit_max_months=hit_max_months,
     )
 
     meta = {

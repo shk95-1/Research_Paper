@@ -48,7 +48,8 @@ CREATE TABLE run_source (
     records          INTEGER NOT NULL DEFAULT 0,
     errors           INTEGER NOT NULL DEFAULT 0,
     budget_remaining INTEGER,             -- 종료 시점 x-ratelimit-remaining. NULL = 헤더 없음
-    stopped_reason   TEXT,                -- NULL = 정상 완료 / budget_exhausted / max_pages / error
+    stopped_reason   TEXT,                -- NULL = 정상 완료 / budget_exhausted / transport_error
+                                           -- / max_pages / max_months / error
     PRIMARY KEY (run_id, source)
 );
 

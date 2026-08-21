@@ -66,15 +66,23 @@ def build_filter(query, window):
     )
 
 
-def determine_stopped_reason(*, budget_exhausted, hit_max_pages):
+def determine_stopped_reason(*, budget_exhausted, transport_error=False, hit_max_pages):
     """중단 사유를 우선순위대로 정한다. 정상 완료(또는 그 외 실패)면 None. (순수 함수)
 
-    우선순위: 예산 소진이 --max-pages 보다 앞선다 — 둘 다 해당해도 원인은
-    예산이지, 마침 그 페이지에서 상한에 닿은 것이 아니기 때문이다.
-    papers_trend/collect_openalex.py 의 동명 함수와 동일한 규칙이다.
+    우선순위: 예산 소진 > transport 오류 > --max-pages 도달 순서다. 예산
+    소진이 transport 오류보다 앞서는 이유는 BudgetExhausted 가 더 구체적인
+    원인(402/409 로 식별됨)이기 때문이고, 그 둘이 --max-pages 보다 앞서는
+    이유는 둘 다 해당해도 원인은 예산/오류지, 마침 그 페이지에서 상한에
+    닿은 것이 아니기 때문이다. 리뷰 대응(Finding 1): TransportError 로
+    중단해도 이전에는 stopped_reason 이 None 이 되어 RunLog 상태가 "ok"로,
+    CLI exit 코드가 0 으로 기록됐다 — README 의 exit-code 규약(수집이 중간에
+    멈추면 exit 1)과 어긋났다. transport_error 를 우선순위에 넣어 그 정합을
+    되돌린다. papers_trend/collect_openalex.py 의 동명 함수와 동일한 규칙이다.
     """
     if budget_exhausted:
         return "budget_exhausted"
+    if transport_error:
+        return "transport_error"
     if hit_max_pages:
         return "max_pages"
     return None
@@ -245,6 +253,7 @@ def _fetch_profile(query_id, query, config, transport, *, provider, verbose, max
     stopped_early = False
     hit_max_pages = False
     budget_exhausted = False
+    transport_error = False
     host = OpenAlex.policy.host
     started = time.monotonic()  # legacy 와 같은 경과 시간 표시용(진행 출력에만 쓴다)
 
@@ -278,6 +287,7 @@ def _fetch_profile(query_id, query, config, transport, *, provider, verbose, max
                 break
             except TransportError as exc:
                 stopped_early = True
+                transport_error = True
                 warn(
                     f"{query_id}: 페이지 수집 실패 ({exc}). 커서를 저장하고 멈춥니다."
                     " 잠시 뒤 다시 실행하면 이어집니다."
@@ -333,7 +343,9 @@ def _fetch_profile(query_id, query, config, transport, *, provider, verbose, max
 
     is_census = not limit and cursor is None and not stopped_early
     stopped_reason = determine_stopped_reason(
-        budget_exhausted=budget_exhausted, hit_max_pages=hit_max_pages
+        budget_exhausted=budget_exhausted,
+        transport_error=transport_error,
+        hit_max_pages=hit_max_pages,
     )
     meta = {
         "query_id": query_id,

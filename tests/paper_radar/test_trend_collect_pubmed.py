@@ -95,6 +95,32 @@ class DetermineStoppedReasonTest(unittest.TestCase):
             "budget_exhausted",
         )
 
+    def test_is_transport_error_when_a_transport_error_stopped_the_run(self):
+        # 리뷰 대응(Finding 1): _fetch_month() 의 "transport_error" reason 이
+        # 여기까지 살아남아야 RunLog 상태/CLI exit 코드가 정상 완료와 구분된다.
+        self.assertEqual(
+            collect_pubmed.determine_stopped_reason(
+                budget_exhausted=False, transport_error=True, hit_max_months=False
+            ),
+            "transport_error",
+        )
+
+    def test_budget_exhausted_wins_over_transport_error(self):
+        self.assertEqual(
+            collect_pubmed.determine_stopped_reason(
+                budget_exhausted=True, transport_error=True, hit_max_months=False
+            ),
+            "budget_exhausted",
+        )
+
+    def test_transport_error_wins_over_max_months(self):
+        self.assertEqual(
+            collect_pubmed.determine_stopped_reason(
+                budget_exhausted=False, transport_error=True, hit_max_months=True
+            ),
+            "transport_error",
+        )
+
 
 class _CollectPubmedTestCase(unittest.TestCase):
     def setUp(self):
@@ -376,6 +402,26 @@ class BudgetAndMaxMonthsTest(_CollectPubmedTestCase):
         self.assertEqual(meta["stopped_reason"], "max_months")
         self.assertEqual(meta["months_this_run"], 1)
         self.assertFalse(meta["is_census"])
+
+    def test_a_transport_error_mid_run_reports_transport_error_and_a_partial_run(self):
+        """리뷰 대응(Finding 1): esearch 가 TransportError(5xx 재시도 소진)로
+        멈춰도 이전에는 _fetch_profile() 이 reason="transport_error" 를
+        budget_exhausted 만 보고 버려 stopped_reason 이 None 이 됐다 — RunLog
+        상태가 "ok", CLI exit 코드가 0 으로 잘못 기록됐다(README 의 exit-code
+        규약과 어긋남). 5xx 를 max_attempts(5)회 반복시켜 TransientError 를
+        유발한다."""
+        self.config["window"] = {"from": "2024-01-01", "to": "2024-01-31"}
+        transport, session = self._transport([FakeResponse(503) for _ in range(5)])
+        conn, run_log = self._run_log()
+        meta = collect_pubmed.collect_profile(
+            "demo", "demo", self.config, transport, run_log, verbose=False
+        )
+        self.assertEqual(meta["stopped_reason"], "transport_error")
+        self.assertFalse(meta["is_census"])
+        status = conn.execute("select status from run").fetchone()
+        self.assertEqual(status, ("partial",))
+        source_reason = conn.execute("select stopped_reason from run_source").fetchone()
+        self.assertEqual(source_reason, ("transport_error",))
 
 
 class RateLimitBackoffTest(_CollectPubmedTestCase):
