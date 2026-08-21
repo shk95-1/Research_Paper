@@ -1,19 +1,54 @@
 """schema 모듈: user_version 러너 — 빈 DB, 구 DB 입양, 멱등성, 실패 롤백."""
 
+import json
 import os
 import sqlite3
 import tempfile
 import unittest
 
 from paper_radar.storage import schema
-from paper_radar.storage.migrations import MIGRATIONS
-from papers import store as legacy_store
+from paper_radar.storage.migrations import MIGRATIONS, m0001_baseline
 
 
 def _fresh_connection(path):
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _seed_legacy_shaped_database(path):
+    """papers/store.py 의 connect()+upsert() 가 만들던 것과 같은 모양(버전
+    개념이 없는 스키마)의 DB 를 만들고 논문 1건을 넣는다.
+
+    m0001_baseline.SCHEMA 는 papers/store.py 의 SCHEMA 상수를 문자 그대로
+    복사한 것이라(그 모듈의 docstring 참고) 레거시 패키지 없이도 같은 모양을
+    재현할 수 있다 — T7 이 papers/ 를 지운 뒤에도 "구 스키마로 만들어진 DB 위에
+    마이그레이션을 돌리면 무해하게 입양된다"를 계속 검증하려면 이 방법뿐이다."""
+    conn = sqlite3.connect(path)
+    conn.executescript(m0001_baseline.SCHEMA)
+    conn.execute(
+        "INSERT INTO papers (key, doi, title, authors, collected_at,"
+        " crossref_verified, title_match, found_in_sources, is_retracted,"
+        " has_doi, confidence_score)"
+        " VALUES (:key, :doi, :title, :authors, :collected_at,"
+        " :crossref_verified, :title_match, :found_in_sources, :is_retracted,"
+        " :has_doi, :confidence_score)",
+        {
+            "key": "10.1/legacy",
+            "doi": "10.1/legacy",
+            "title": "Legacy paper",
+            "authors": json.dumps(["Kim"], ensure_ascii=False),
+            "collected_at": "2026-01-01T00:00:00Z",
+            "crossref_verified": 1,
+            "title_match": 1,
+            "found_in_sources": json.dumps(["openalex"], ensure_ascii=False),
+            "is_retracted": 0,
+            "has_doi": 1,
+            "confidence_score": 80,
+        },
+    )
+    conn.commit()
+    conn.close()
 
 
 class MigrateOnAnEmptyDatabaseTest(unittest.TestCase):
@@ -56,31 +91,13 @@ class MigrateOnAnEmptyDatabaseTest(unittest.TestCase):
 
 
 class AdoptsALegacyDatabaseTest(unittest.TestCase):
-    """papers/store.py 의 connect() 로 만든(버전 개념이 없는) DB 위에서."""
+    """papers/store.py 가 만들던 것과 같은 모양(버전 개념이 없는) DB 위에서."""
 
     def setUp(self):
         handle, self.path = tempfile.mkstemp(suffix=".db")
         os.close(handle)
         os.unlink(self.path)
-        legacy_conn = legacy_store.connect(self.path)
-        legacy_store.upsert(
-            legacy_conn,
-            {
-                "doi": "10.1/legacy",
-                "title": "Legacy paper",
-                "authors": ["Kim"],
-                "collected_at": "2026-01-01T00:00:00Z",
-                "verification": {
-                    "crossref_verified": True,
-                    "title_match": True,
-                    "found_in_sources": ["openalex"],
-                    "is_retracted": False,
-                    "has_doi": True,
-                    "confidence_score": 80,
-                },
-            },
-        )
-        legacy_conn.close()
+        _seed_legacy_shaped_database(self.path)
         self.conn = _fresh_connection(self.path)
         self.addCleanup(self._cleanup)
 

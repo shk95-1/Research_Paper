@@ -12,15 +12,16 @@
 
 ## 설치 및 테스트
 
-[uv](https://docs.astral.sh/uv/) 로 두 모듈을 함께 관리합니다.
+[uv](https://docs.astral.sh/uv/) 로 관리합니다. 두 모듈 모두 `src/paper_radar/`
+아래(`paper-radar` 패키지)로 이식되어 있고, `paper-radar` 콘솔 스크립트(또는
+`python -m paper_radar`) 하위 명령으로 씁니다 — 아래 각 절의 명령은 이
+기준입니다. (구 `papers`/`papers_trend` 패키지와 `python -m papers ...` 실행법은
+제거됐습니다. 상세 재작성은 T16 예정입니다.)
 
 ```bash
 uv sync --extra dev   # .venv 구성 (requests, python-dotenv + pytest, ruff)
-uv run pytest         # papers/tests + papers_trend/tests 전부 (네트워크 안 씀)
+uv run pytest         # tests/paper_radar 전부 (네트워크 안 씀)
 ```
-
-기존 방식(`python -m unittest discover -s papers/tests -t .`)도 여전히 동작합니다.
-아래 모듈별 테스트 안내는 이 방식 기준입니다.
 
 ## papers — 논문 근거 수집기
 
@@ -40,13 +41,13 @@ PDF 원문은 내려받지 않고 메타데이터, 초록, 요약까지만 확�
 
 ```bash
 # 수집 (기본 기간은 최근 10년)
-python -m papers collect --query "cosmetic" --from 2016 --to 2026 --limit 100
+uv run paper-radar evidence collect --query "cosmetic" --from 2016 --to 2026 --limit 100
 
 # 연도별 논문 수
-python -m papers trend --query "cosmetic retinol"
+uv run paper-radar evidence trend --query "cosmetic retinol"
 
 # 저장된 논문에서 근거 뽑기
-python -m papers cite --keyword "skin barrier" --min-confidence 70
+uv run paper-radar evidence cite --keyword "skin barrier" --min-confidence 70
 ```
 
 결과는 `papers/out/papers.db`(SQLite)와 `papers/out/papers.json`에 쌓입니다.
@@ -91,10 +92,10 @@ relevance는 인용수를 크게 반영하므로 **최근 논문이 구조적으
 
 ```bash
 # 단위 테스트. 네트워크를 쓰지 않습니다
-python -m unittest discover -s papers/tests -t .
+uv run pytest tests/paper_radar
 
-# 실제 API 응답 형태가 바뀌었는지 확인
-python -m papers.tests.live_smoke
+# 실제 API 응답 형태가 바뀌었는지 확인 (네트워크를 씁니다)
+uv run python tool/live_smoke.py
 ```
 
 의존성은 `requests`와 `python-dotenv`뿐입니다. 나머지는 표준 라이브러리입니다.
@@ -112,12 +113,12 @@ OpenAlex 단독으로 전수 수집하고, 월 단위로 집계해 CSV 5개를 �
 현재 데이터: **`sunscreen` 프로파일 전수 7,623건** (2023-09 ~ 2026-08, 36개월).
 
 ```bash
-python -m papers_trend.collect_openalex --profile sunscreen   # 네트워크
-python -m papers_trend.aggregate        --profile sunscreen   # CSV 생성
-python -m papers_trend.unmatched        --profile sunscreen   # 사전 확장 후보
+uv run paper-radar trend collect   --profile sunscreen   # 네트워크
+uv run paper-radar trend aggregate --profile sunscreen   # CSV 생성
+uv run paper-radar trend unmatched --profile sunscreen   # 사전 확장 후보
 ```
 
-산출물은 [`papers_trend/out/`](papers_trend/out/) 에 있습니다.
+산출물은 [`out/trend/sunscreen/`](out/trend/sunscreen/) 에 있습니다.
 
 | 파일 | 알갱이 | 행 |
 |---|---|---|
@@ -129,18 +130,17 @@ python -m papers_trend.unmatched        --profile sunscreen   # 사전 확장 �
 
 ### 읽기 전에
 
-**컬럼별 설명은 [papers_trend/README.md](papers_trend/README.md) 에 있습니다.**
-그 문서의 첫 세 항목은 caveat 이고, 특히 첫 번째는 수치 해석을 바꿉니다 —
-OpenAlex 키워드 어휘가 2025-10 에 교체되어 `trend_class` 의 `declining` 상당수가
-인공물입니다. 시계열은 `is_in_lexicon = True` 로 걸러서 보세요.
-
-가설과 반증조건, 측정값은 [papers_trend/ASSUMPTIONS.md](papers_trend/ASSUMPTIONS.md)
-에 있습니다. 확인한 것과 가정한 것을 구분해 두었습니다.
+컬럼별 설명·caveat(OpenAlex 키워드 어휘가 2025-10 에 교체되어 `trend_class`
+의 `declining` 상당수가 인공물이라는 것 포함)과 가설·반증조건 문서는 구
+`papers_trend/README.md`, `papers_trend/ASSUMPTIONS.md` 에 있었습니다. T7 이
+구 `papers_trend/` 패키지를 제거하면서 이 문서들도 git 이력으로만 남았습니다
+(예: `git show 24444fe:papers_trend/README.md`) — 새 위치로의 재작성은 T16
+예정입니다. 그때까지는 시계열을 `is_in_lexicon = True` 로 걸러서 보세요.
 
 ### 원본 데이터는 저장소에 없습니다
 
-`papers_trend/raw/` 의 OpenAlex 응답 원본(JSONL 303MB)은 올리지 않았습니다.
-따라서 **CSV 를 이 저장소만으로 재생성할 수 없습니다.** 다시 만들려면
-`collect_openalex` 부터 실행해야 하고, OpenAlex 일일 예산을 씁니다
-(2026-02-13부터 계량제: 목록/페이지 호출 10크레딧, search 호출 $0.001,
-무인증 1,000크레딧/일, 무료 키 등록 시 100,000크레딧/일. UTC 자정 초기화).
+OpenAlex 응답 원본(JSONL 303MB)은 올리지 않았습니다. 따라서 **CSV 를 이
+저장소만으로 재생성할 수 없습니다.** 다시 만들려면 `trend collect` 부터
+실행해야 하고, OpenAlex 일일 예산을 씁니다(2026-02-13부터 계량제: 목록/페이지
+호출 10크레딧, search 호출 $0.001, 무인증 1,000크레딧/일, 무료 키 등록 시
+100,000크레딧/일. UTC 자정 초기화).

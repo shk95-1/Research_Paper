@@ -10,7 +10,6 @@ papers/tests/test_verify.py 의 모든 케이스를 새 시그니처(evidence di
 import unittest
 
 from paper_radar.evidence import verify
-from papers import verify as legacy_verify
 
 
 def record(**overrides):
@@ -205,77 +204,127 @@ class BuildTest(unittest.TestCase):
 
 
 class ScoreParityWithLegacyTest(unittest.TestCase):
-    """레거시 papers.verify.build 와 새 verify.build 가 동일 입력에 같은
-    confidence_score 를 내는지 직접 비교한다. papers/ 가 살아있는 동안(T7
-    이전)만 가능한 검증이라 지금 고정해 둔다 — 두 구현이 슬쩍 갈라져도 이
-    테스트가 즉시 잡는다."""
+    """새 verify.build 가 레거시 papers.verify.build 와 동일한 판정을 내리는지
+    고정 기대값으로 검증한다.
+
+    레거시 papers/ 가 아직 살아 있던 T5b~T6 기간에는 이 CASES 를 두 구현
+    모두에 직접 돌려 confidence_score/crossref_verified/title_match/
+    is_retracted/has_doi 가 문자 그대로 같음을 확인했다(commit 54cf083
+    시점). T7 이 레거시 papers/ 를 제거하면서 그 살아있는 비교를 더는 할 수
+    없어, 그때 확인된 값을 리터럴로 고정한다 — 두 구현을 다시 나란히 놓고
+    비교할 수는 없지만, 새 구현이 그 시점 이후로 슬쩍 갈라지면 이 테스트가
+    잡는다."""
 
     CASES = [
         {
             "record": record(),
             "found_in_sources": ["openalex", "semantic_scholar"],
             "crossref": {"title": "Retinol and the skin barrier"},
+            "expected": {
+                "confidence_score": 85,
+                "crossref_verified": True,
+                "title_match": True,
+                "is_retracted": False,
+                "has_doi": True,
+            },
         },
         {
             "record": record(),
             "found_in_sources": ["openalex"],
             "crossref": None,
+            "expected": {
+                "confidence_score": 15,
+                "crossref_verified": False,
+                "title_match": False,
+                "is_retracted": False,
+                "has_doi": True,
+            },
         },
         {
             "record": record(abstract=None),
             "found_in_sources": ["openalex"],
             "crossref": None,
+            "expected": {
+                "confidence_score": 5,
+                "crossref_verified": False,
+                "title_match": False,
+                "is_retracted": False,
+                "has_doi": True,
+            },
         },
         {
             "record": record(),
             "found_in_sources": ["openalex", "semantic_scholar", "europepmc"],
             "crossref": {"title": "Retinol and the skin barrier"},
+            "expected": {
+                "confidence_score": 100,
+                "crossref_verified": True,
+                "title_match": True,
+                "is_retracted": False,
+                "has_doi": True,
+            },
         },
         {
             "record": record(),
             "found_in_sources": ["openalex", "semantic_scholar"],
             "crossref": {"title": "Something else entirely about sunscreen"},
+            "expected": {
+                "confidence_score": 60,  # 85 - 25 (제목 불일치로 title_match 점수 상실)
+                "crossref_verified": True,
+                "title_match": False,
+                "is_retracted": False,
+                "has_doi": True,
+            },
         },
         {
             "record": record(is_retracted=True),
             "found_in_sources": ["openalex", "semantic_scholar", "europepmc"],
             "crossref": {"title": "Retinol and the skin barrier"},
+            "expected": {
+                "confidence_score": 0,
+                "crossref_verified": True,
+                "title_match": True,
+                "is_retracted": True,
+                "has_doi": True,
+            },
         },
         {
             "record": record(doi=None),
             "found_in_sources": ["openalex", "europepmc"],
             "crossref": None,
+            "expected": {
+                "confidence_score": 30,  # 5 + 15 + 10
+                "crossref_verified": False,
+                "title_match": False,
+                "is_retracted": False,
+                "has_doi": False,
+            },
         },
         {
             "record": record(),
             "found_in_sources": ["openalex"],
             "crossref": {},
+            "expected": {
+                "confidence_score": 45,  # 5 + 30 + 10
+                "crossref_verified": True,
+                "title_match": False,
+                "is_retracted": False,
+                "has_doi": True,
+            },
         },
     ]
 
-    def test_confidence_score_matches_the_legacy_implementation_for_every_case(self):
+    def test_confidence_score_matches_the_fixed_legacy_baseline_for_every_case(self):
         for case in self.CASES:
             with self.subTest(case=case):
-                legacy_result = legacy_verify.build(
-                    case["record"],
-                    crossref=case["crossref"],
-                    found_in_sources=case["found_in_sources"],
-                )
                 evidence = {"crossref": case["crossref"]} if case["crossref"] is not None else None
                 new_result = verify.build(
                     case["record"],
                     found_in_sources=case["found_in_sources"],
                     evidence=evidence,
                 )
-                self.assertEqual(
-                    new_result["confidence_score"], legacy_result["confidence_score"]
-                )
-                self.assertEqual(
-                    new_result["crossref_verified"], legacy_result["crossref_verified"]
-                )
-                self.assertEqual(new_result["title_match"], legacy_result["title_match"])
-                self.assertEqual(new_result["is_retracted"], legacy_result["is_retracted"])
-                self.assertEqual(new_result["has_doi"], legacy_result["has_doi"])
+                for key, expected_value in case["expected"].items():
+                    self.assertEqual(new_result[key], expected_value, key)
 
 
 if __name__ == "__main__":

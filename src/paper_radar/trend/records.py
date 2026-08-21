@@ -36,6 +36,12 @@ HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parents[2]
 
 NEW_RAW_ROOT = REPO_ROOT / "data" / "raw"
+# T7 이 papers_trend/ 패키지(코드)를 지웠지만 이 경로는 여전히 유효한
+# fallback 이다 — 여기서 읽는 것은 패키지가 아니라 파일시스템 경로이고,
+# 패키지가 삭제되기 전에 이미 이 경로에 모아 둔 기존 사용자의 수집 데이터가
+# (papers_trend/raw/ 는 .gitignore 대상이라 git rm 의 영향을 받지 않는다)
+# 그대로 남아 있을 수 있다. 그 데이터를 재수집 없이 계속 읽을 수 있어야
+# 하므로 폴백 자체는 유지한다(T7 컨트롤러 ruling).
 LEGACY_RAW_ROOT = REPO_ROOT / "papers_trend" / "raw"
 DEFAULT_PROVIDER = "openalex"
 
