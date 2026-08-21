@@ -141,6 +141,19 @@ class Transport:
         self._last_call: dict[str, float] = {}  # host -> 마지막 호출 시각(clock 단위)
         self.budget = BudgetTracker()  # host 별 예산 추적. 이 인스턴스가 소유한다
 
+    def set_observer(
+        self, observer: Callable[[Fetch, int | None, int, int, str | None], None] | None
+    ) -> None:
+        """observer 훅을 생성 후에 (재)설정한다.
+
+        T5b 의 collect() 는 RunLog.start() 로 run_id 를 발급받은 "뒤"에야 그
+        run_id 를 캡처하는 observer 콜백을 만들 수 있는데, Transport 자체는
+        보통 그보다 먼저(호출자가 collect() 를 부르기 전에) 만들어진다. 그래서
+        생성자의 observer= 만으로는 이 순서를 맞출 수 없어, 나중에 설정할 수
+        있는 통로를 열어 둔다.
+        """
+        self._observer = observer
+
     def _notify(
         self, fetch: Fetch, status: int | None, attempt: int, elapsed_ms: int, error: str | None
     ) -> None:

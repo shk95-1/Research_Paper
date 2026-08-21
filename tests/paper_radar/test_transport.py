@@ -424,6 +424,38 @@ class ObserverTest(unittest.TestCase):
         self.assertEqual(payload.status, 200)
         self.assertEqual(payload.json_data(), {"ok": True})
 
+    def test_set_observer_wires_up_a_hook_installed_after_construction(self):
+        """T5b 의 collect() 는 RunLog.start() 로 run_id 를 받은 뒤에야 observer 를
+        만들 수 있다 — 생성자가 아니라 set_observer() 로 나중에 붙일 수 있어야 한다."""
+        clock, sleep, _ = make_clock_and_sleep()
+        session = FakeSession([FakeResponse(200)])
+        transport = Transport(session=session, clock=clock, sleep=sleep)
+        calls = []
+
+        transport.set_observer(
+            lambda fetch, status, attempt, elapsed_ms, error: calls.append((status, attempt))
+        )
+        transport.request(Fetch(url="https://api.example.org/x"), DEFAULT_POLICY)
+
+        self.assertEqual(calls, [(200, 0)])
+
+    def test_set_observer_none_removes_a_previously_installed_hook(self):
+        clock, sleep, _ = make_clock_and_sleep()
+        session = FakeSession([FakeResponse(200), FakeResponse(200)])
+        calls = []
+        transport = Transport(
+            session=session,
+            clock=clock,
+            sleep=sleep,
+            observer=lambda fetch, status, attempt, elapsed_ms, error: calls.append(status),
+        )
+        transport.request(Fetch(url="https://api.example.org/x"), DEFAULT_POLICY)
+
+        transport.set_observer(None)
+        transport.request(Fetch(url="https://api.example.org/x"), DEFAULT_POLICY)
+
+        self.assertEqual(calls, [200])  # 두 번째 호출은 관측되지 않았다
+
     def test_no_observer_means_no_crash(self):
         """observer=None(기본값)이면 그냥 아무 일도 하지 않아야 한다."""
         clock, sleep, _ = make_clock_and_sleep()
