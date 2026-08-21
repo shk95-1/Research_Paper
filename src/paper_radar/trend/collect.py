@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from datetime import UTC, date, datetime
 
 from paper_radar.sources.openalex import BASE, OpenAlex
@@ -245,6 +246,7 @@ def _fetch_profile(query_id, query, config, transport, *, provider, verbose, max
     hit_max_pages = False
     budget_exhausted = False
     host = OpenAlex.policy.host
+    started = time.monotonic()  # legacy 와 같은 경과 시간 표시용(진행 출력에만 쓴다)
 
     with open(path, "a", encoding="utf-8") as handle:
         while cursor and len(already) < target:
@@ -310,9 +312,11 @@ def _fetch_profile(query_id, query, config, transport, *, provider, verbose, max
 
             remaining = transport.budget.remaining(host)
             if verbose:
+                elapsed = time.monotonic() - started
                 remaining_note = f"  예산잔량 {remaining:,}" if remaining is not None else ""
                 print(
-                    f"  {len(already):,}/{target:,}  ({state['pages']}페이지){remaining_note}",
+                    f"  {len(already):,}/{target:,}  "
+                    f"({state['pages']}페이지, {elapsed:.0f}초){remaining_note}",
                     flush=True,
                 )
             if remaining == 0:

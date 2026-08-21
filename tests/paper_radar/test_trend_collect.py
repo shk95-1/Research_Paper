@@ -14,6 +14,8 @@ transport.budget.remaining(host) 를 그대로 읽는다.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import sqlite3
 import tempfile
@@ -139,6 +141,26 @@ class SidecarTest(_CollectTestCase):
         with open(collect.ids_path("demo"), encoding="utf-8") as handle:
             lines = [line.strip() for line in handle if line.strip()]
         self.assertEqual(lines, ["https://openalex.org/W1", "https://openalex.org/W2"])
+
+
+class ProgressOutputTest(_CollectTestCase):
+    """리뷰 finding: 레거시 collect_openalex.py 는 페이지별 진행 출력에 경과
+    초를 포함했다(`f"...({pages}페이지, {elapsed:.0f}초){remaining_note}"`,
+    time.monotonic() 기반). 이식 과정에서 조용히 빠졌던 것을 복원한다 — 전체
+    문자열을 통째로 고정하면(초 값 자체가 비결정적) 취약하므로, 형식의
+    핵심(페이지 수 뒤에 "N초)" 패턴이 온다)만 고정한다.
+    """
+
+    def test_page_progress_line_includes_elapsed_seconds(self):
+        transport = self._transport([_count(1), _page([{"id": "https://openalex.org/W1"}])])
+        _, run_log = self._run_log()
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            collect.collect_profile("demo", "demo", self.config, transport, run_log, verbose=True)
+
+        text = output.getvalue()
+        self.assertRegex(text, r"\(1페이지, \d+초\)")
 
 
 class BudgetAndMaxPagesTest(_CollectTestCase):
