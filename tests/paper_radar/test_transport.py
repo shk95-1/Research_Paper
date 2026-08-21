@@ -1,0 +1,327 @@
+"""transport.http.Transport: 페이스, 재시도, 오류 타입, 인증 주입, captured_at 스탬프.
+
+papers/tests/test_http.py 의 FakeSession/FakeResponse 페이크 패턴을 그대로
+따르되, Transport 는 session.request(method, url, params, headers, data,
+timeout) 단일 진입점을 쓰므로 페이크도 그 시그니처에 맞춘다. 실제 sleep 도
+실제 clock 도 쓰지 않는다 — 둘 다 주입해서 테스트가 즉시 끝난다.
+"""
+
+import unittest
+from datetime import UTC, datetime
+from unittest import mock
+
+import requests
+
+from paper_radar.contract import Fetch, SourcePolicy
+from paper_radar.transport import http
+from paper_radar.transport.errors import (
+    BudgetExhausted,
+    NotFound,
+    ParseError,
+    PermanentError,
+    RateLimited,
+    TransientError,
+)
+from paper_radar.transport.http import Transport
+
+
+class FakeResponse:
+    def __init__(self, status_code, headers=None, body=b"{}"):
+        self.status_code = status_code
+        self.headers = headers or {}
+        self.content = body
+
+
+class FakeSession:
+    """호출 순서대로 응답을 돌려주는 세션. 요청 인자를 기록한다."""
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.calls = []
+
+    def request(self, method, url, params=None, headers=None, data=None, timeout=None):
+        self.calls.append(
+            {
+                "method": method,
+                "url": url,
+                "params": params,
+                "headers": headers,
+                "data": data,
+                "timeout": timeout,
+            }
+        )
+        if not self._responses:
+            raise AssertionError("예상보다 많이 호출되었습니다")
+        item = self._responses.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+
+def make_clock_and_sleep(start=0.0):
+    """fake clock 과 fake sleep 을 한 쌍으로 만든다. sleep 은 clock 을 실제로 전진시켜서
+    다음 _throttle 계산이 일관되게 맞물리게 한다 — 진짜로 기다리지는 않는다.
+    """
+    state = {"now": start}
+    calls = []
+
+    def clock():
+        return state["now"]
+
+    def sleep(seconds):
+        calls.append(seconds)
+        state["now"] += seconds
+
+    return clock, sleep, calls
+
+
+DEFAULT_POLICY = SourcePolicy(host="api.example.org", min_interval_s=0.0)
+
+
+class PacingTest(unittest.TestCase):
+    def test_sleeps_when_second_call_is_faster_than_min_interval(self):
+        """같은 host 로의 두 번째 호출이 min_interval_s 안에 들어오면 sleep 해야 한다."""
+        clock, sleep, sleeps = make_clock_and_sleep()
+        session = FakeSession([FakeResponse(200), FakeResponse(200)])
+        transport = Transport(session=session, clock=clock, sleep=sleep)
+        policy = SourcePolicy(host="api.example.org", min_interval_s=1.0)
+        fetch = Fetch(url="https://api.example.org/x")
+
+        transport.request(fetch, policy)
+        transport.request(fetch, policy)
+
+        self.assertIn(1.0, sleeps)
+
+    def test_does_not_sleep_when_interval_already_elapsed(self):
+        """min_interval_s 가 이미 지났다면 페이스 제한으로 인한 sleep 이 없어야 한다."""
+        clock, sleep, sleeps = make_clock_and_sleep()
+        session = FakeSession([FakeResponse(200), FakeResponse(200)])
+        transport = Transport(session=session, clock=clock, sleep=sleep)
+        policy = SourcePolicy(host="api.example.org", min_interval_s=1.0)
+        fetch = Fetch(url="https://api.example.org/x")
+
+        transport.request(fetch, policy)
+        # sleep 을 거치지 않고 "2초 전에 호출했다"는 상태를 직접 만든다
+        transport._last_call["api.example.org"] -= 2.0
+        transport.request(fetch, policy)
+
+        self.assertEqual(sleeps, [])
+
+
+class RetryTest(unittest.TestCase):
+    def test_retries_on_429_with_exponential_backoff_then_succeeds(self):
+        """429 는 재시도 대상이고, 백오프는 1.5 * 2**attempt 여야 한다."""
+        clock, sleep, sleeps = make_clock_and_sleep()
+        session = FakeSession([FakeResponse(429), FakeResponse(200, body=b'{"ok": true}')])
+        transport = Transport(session=session, clock=clock, sleep=sleep)
+
+        payload = transport.request(Fetch(url="https://api.example.org/x"), DEFAULT_POLICY)
+
+        self.assertEqual(payload.status, 200)
+        self.assertEqual(len(session.calls), 2)
+        self.assertEqual(sleeps, [1.5])
+
+    def test_numeric_retry_after_header_overrides_backoff(self):
+        """Retry-After 가 숫자형이면 지수 백오프(1.5초)보다 그 값(5초)을 써야 한다."""
+        clock, sleep, sleeps = make_clock_and_sleep()
+        session = FakeSession(
+            [FakeResponse(429, headers={"Retry-After": "5"}), FakeResponse(200)]
+        )
+        transport = Transport(session=session, clock=clock, sleep=sleep)
+
+        transport.request(Fetch(url="https://api.example.org/x"), DEFAULT_POLICY)
+
+        self.assertEqual(sleeps, [5.0])
+
+    def test_http_date_retry_after_header_is_parsed(self):
+        """기존 papers/http.py 는 HTTP-date 형 Retry-After 를 버렸다. 이번에는
+        email.utils.parsedate_to_datetime 으로 파싱해 초 단위 지연으로 바꿔야 한다."""
+        fixed_now = datetime(2026, 8, 21, 0, 0, 0, tzinfo=UTC)
+        clock, sleep, sleeps = make_clock_and_sleep()
+        session = FakeSession(
+            [
+                FakeResponse(429, headers={"Retry-After": "Fri, 21 Aug 2026 00:00:10 GMT"}),
+                FakeResponse(200),
+            ]
+        )
+        transport = Transport(session=session, clock=clock, sleep=sleep)
+
+        with mock.patch.object(http, "_utcnow", return_value=fixed_now):
+            transport.request(Fetch(url="https://api.example.org/x"), DEFAULT_POLICY)
+
+        self.assertEqual(sleeps, [10.0])
+
+    def test_raises_rate_limited_when_429_retries_are_exhausted(self):
+        """429 가 max_attempts 만큼 반복되면 RateLimited 로 포기해야 한다."""
+        policy = SourcePolicy(host="api.example.org", min_interval_s=0.0, max_attempts=3)
+        clock, sleep, _ = make_clock_and_sleep()
+        session = FakeSession([FakeResponse(429) for _ in range(3)])
+        transport = Transport(session=session, clock=clock, sleep=sleep)
+
+        with self.assertRaises(RateLimited):
+            transport.request(Fetch(url="https://api.example.org/x"), policy)
+        self.assertEqual(len(session.calls), 3)
+
+    def test_raises_transient_error_when_5xx_retries_are_exhausted(self):
+        """5xx 가 max_attempts 만큼 반복되면 TransientError 로 포기해야 한다."""
+        policy = SourcePolicy(host="api.example.org", min_interval_s=0.0, max_attempts=3)
+        clock, sleep, _ = make_clock_and_sleep()
+        session = FakeSession([FakeResponse(503) for _ in range(3)])
+        transport = Transport(session=session, clock=clock, sleep=sleep)
+
+        with self.assertRaises(TransientError):
+            transport.request(Fetch(url="https://api.example.org/x"), policy)
+        self.assertEqual(len(session.calls), 3)
+
+    def test_survives_connection_exception_and_retries(self):
+        """연결 예외는 즉시 죽지 않고 재시도 대상으로 취급해야 한다."""
+        clock, sleep, _ = make_clock_and_sleep()
+        session = FakeSession([requests.ConnectionError("연결 끊김"), FakeResponse(200)])
+        transport = Transport(session=session, clock=clock, sleep=sleep)
+
+        payload = transport.request(Fetch(url="https://api.example.org/x"), DEFAULT_POLICY)
+
+        self.assertEqual(payload.status, 200)
+
+    def test_raises_transient_error_when_connection_exceptions_are_exhausted(self):
+        """연결 예외가 계속되면 결국 TransientError 로 포기해야 한다."""
+        policy = SourcePolicy(host="api.example.org", min_interval_s=0.0, max_attempts=2)
+        clock, sleep, _ = make_clock_and_sleep()
+        session = FakeSession([requests.Timeout("타임아웃"), requests.Timeout("타임아웃")])
+        transport = Transport(session=session, clock=clock, sleep=sleep)
+
+        with self.assertRaises(TransientError):
+            transport.request(Fetch(url="https://api.example.org/x"), policy)
+
+
+class ErrorTypeTest(unittest.TestCase):
+    def _transport(self, responses):
+        clock, sleep, _ = make_clock_and_sleep()
+        session = FakeSession(responses)
+        return Transport(session=session, clock=clock, sleep=sleep), session
+
+    def test_404_raises_not_found(self):
+        """404 는 '그 레코드는 없다'는 정상 결과의 하나 — NotFound 로 명확히 구분한다."""
+        transport, session = self._transport([FakeResponse(404)])
+        with self.assertRaises(NotFound):
+            transport.request(Fetch(url="https://api.example.org/x"), DEFAULT_POLICY)
+        self.assertEqual(len(session.calls), 1)
+
+    def test_402_raises_budget_exhausted_without_retrying(self):
+        """402 는 일일 예산 소진 추정 — 재시도해도 무의미하므로 즉시 포기해야 한다."""
+        transport, session = self._transport([FakeResponse(402)])
+        with self.assertRaises(BudgetExhausted):
+            transport.request(Fetch(url="https://api.example.org/x"), DEFAULT_POLICY)
+        self.assertEqual(len(session.calls), 1)
+
+    def test_409_raises_budget_exhausted_without_retrying(self):
+        transport, session = self._transport([FakeResponse(409)])
+        with self.assertRaises(BudgetExhausted):
+            transport.request(Fetch(url="https://api.example.org/x"), DEFAULT_POLICY)
+        self.assertEqual(len(session.calls), 1)
+
+    def test_other_4xx_raises_permanent_error(self):
+        """404/402/409 를 제외한 4xx 는 요청 자체가 잘못됐다는 뜻 — 재시도하지 않는다."""
+        transport, session = self._transport([FakeResponse(418)])
+        with self.assertRaises(PermanentError):
+            transport.request(Fetch(url="https://api.example.org/x"), DEFAULT_POLICY)
+        self.assertEqual(len(session.calls), 1)
+
+    def test_json_data_raises_parse_error_on_malformed_body(self):
+        """200 인데 JSON 이 아니면 get_json() 이 None 이 아니라 ParseError 를 던져야 한다."""
+        transport, _ = self._transport([FakeResponse(200, body=b"<html>not json</html>")])
+        with self.assertRaises(ParseError):
+            transport.get_json("https://api.example.org/x", policy=DEFAULT_POLICY)
+
+    def test_budget_status_does_not_overlap_retry_status(self):
+        """402/409 는 재시도 없이 즉시 포기하고 429/5xx 는 재시도한다 — 겹치면 둘 중
+        하나의 분기가 죽은 코드가 된다."""
+        self.assertEqual(http.BUDGET_STATUS & http.RETRY_STATUS, frozenset())
+
+
+class BudgetObservationTest(unittest.TestCase):
+    def test_observes_budget_headers_even_on_an_error_response(self):
+        """오류 응답이라도 예산 헤더가 실려 오면 기록해야 한다 — 소진 직전에 알아야
+        다음 실행에서 예산을 아낄 수 있다."""
+        clock, sleep, _ = make_clock_and_sleep()
+        session = FakeSession([FakeResponse(404, headers={"x-ratelimit-remaining": "42"})])
+        transport = Transport(session=session, clock=clock, sleep=sleep)
+
+        with self.assertRaises(NotFound):
+            transport.request(Fetch(url="https://api.example.org/x"), DEFAULT_POLICY)
+
+        self.assertEqual(transport.budget.remaining("api.example.org"), 42)
+
+
+class AuthInjectionTest(unittest.TestCase):
+    def test_injects_credential_as_a_query_param_when_auth_kind_is_param(self):
+        clock, sleep, _ = make_clock_and_sleep()
+        session = FakeSession([FakeResponse(200)])
+        transport = Transport(session=session, clock=clock, sleep=sleep)
+        policy = SourcePolicy(
+            host="api.example.org",
+            min_interval_s=0.0,
+            auth_kind="param",
+            auth_env="EXAMPLE_API_KEY",
+            auth_name="api_key",
+        )
+
+        with mock.patch.dict("os.environ", {"EXAMPLE_API_KEY": "secret"}, clear=False):
+            transport.request(Fetch(url="https://api.example.org/x"), policy)
+
+        self.assertEqual(session.calls[0]["params"]["api_key"], "secret")
+
+    def test_injects_credential_as_a_header_when_auth_kind_is_header(self):
+        clock, sleep, _ = make_clock_and_sleep()
+        session = FakeSession([FakeResponse(200)])
+        transport = Transport(session=session, clock=clock, sleep=sleep)
+        policy = SourcePolicy(
+            host="api.example.org",
+            min_interval_s=0.0,
+            auth_kind="header",
+            auth_env="EXAMPLE_API_KEY",
+            auth_name="x-api-key",
+        )
+
+        with mock.patch.dict("os.environ", {"EXAMPLE_API_KEY": "secret"}, clear=False):
+            transport.request(Fetch(url="https://api.example.org/x"), policy)
+
+        self.assertEqual(session.calls[0]["headers"]["x-api-key"], "secret")
+
+    def test_omits_credential_when_env_var_is_absent(self):
+        """키가 없어도 조용히 생략하고 동작해야 한다 — 크래시하지 않는다."""
+        clock, sleep, _ = make_clock_and_sleep()
+        session = FakeSession([FakeResponse(200)])
+        transport = Transport(session=session, clock=clock, sleep=sleep)
+        policy = SourcePolicy(
+            host="api.example.org",
+            min_interval_s=0.0,
+            auth_kind="param",
+            auth_env="MISSING_API_KEY",
+            auth_name="api_key",
+        )
+
+        with mock.patch.dict("os.environ", {}, clear=False):
+            import os as _os
+
+            _os.environ.pop("MISSING_API_KEY", None)
+            transport.request(Fetch(url="https://api.example.org/x"), policy)
+
+        self.assertNotIn("api_key", session.calls[0]["params"])
+
+
+class CapturedAtTest(unittest.TestCase):
+    def test_captured_at_is_stamped_by_transport_not_the_caller(self):
+        fixed_now = datetime(2026, 8, 21, 12, 0, 0, tzinfo=UTC)
+        clock, sleep, _ = make_clock_and_sleep()
+        session = FakeSession([FakeResponse(200)])
+        transport = Transport(session=session, clock=clock, sleep=sleep)
+
+        with mock.patch.object(http, "_utcnow", return_value=fixed_now):
+            payload = transport.request(Fetch(url="https://api.example.org/x"), DEFAULT_POLICY)
+
+        self.assertEqual(payload.captured_at, fixed_now.isoformat())
+
+
+if __name__ == "__main__":
+    unittest.main()
