@@ -10,6 +10,18 @@
 목적이 다르면 모집단이 다릅니다. `papers/` 는 표적 검색 결과라 모집단이 아니고,
 `papers_trend/` 는 검색어에 걸리는 논문을 전수로 받습니다. 그래서 별도 모듈입니다.
 
+## 설치 및 테스트
+
+[uv](https://docs.astral.sh/uv/) 로 두 모듈을 함께 관리합니다.
+
+```bash
+uv sync --extra dev   # .venv 구성 (requests, python-dotenv + pytest, ruff)
+uv run pytest         # papers/tests + papers_trend/tests 전부 (네트워크 안 씀)
+```
+
+기존 방식(`python -m unittest discover -s papers/tests -t .`)도 여전히 동작합니다.
+아래 모듈별 테스트 안내는 이 방식 기준입니다.
+
 ## papers — 논문 근거 수집기
 
 화장품 트렌드에서 도출한 주장을 뒷받침할 논문을 수집하고 검증합니다.
