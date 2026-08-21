@@ -7,7 +7,6 @@ papers/tests/test_cli.py 의 collect/trend/cite 출력 케이스를 새 명령 �
 
 import contextlib
 import io
-import json
 import os
 import tempfile
 import unittest
@@ -17,8 +16,6 @@ from paper_radar import cli
 from paper_radar.evidence.pipeline import CollectReport
 from paper_radar.models import OaLocationRecord, TrialRecord
 from paper_radar.storage import repository
-from paper_radar.transport.http import Transport
-from tests.paper_radar.test_transport import FakeResponse, FakeSession, make_clock_and_sleep
 
 
 def record(**overrides):
@@ -458,147 +455,13 @@ class CollectOutputTest(unittest.TestCase):
         self.assertNotIn("OPENALEX_API_KEY", stderr.getvalue())
 
 
-STUDY = {
-    "protocolSection": {
-        "identificationModule": {"nctId": "NCT01234567", "briefTitle": "SPF50 sunscreen trial"},
-        "statusModule": {
-            "overallStatus": "COMPLETED",
-            "studyFirstPostDateStruct": {"date": "2023-05-01"},
-        },
-        "sponsorCollaboratorsModule": {"leadSponsor": {"name": "Acme Corp", "class": "INDUSTRY"}},
-        "designModule": {"phases": ["PHASE3"], "enrollmentInfo": {"count": 120}},
-        "conditionsModule": {"conditions": ["Sunburn"]},
-        "armsInterventionsModule": {"interventions": [{"type": "DRUG", "name": "SPF50 sunscreen"}]},
-        "outcomesModule": {"primaryOutcomes": [{"measure": "Erythema score"}]},
-    },
-    "hasResults": True,
-}
-
-
-def _json_response(payload, status=200):
-    return FakeResponse(status, body=json.dumps(payload).encode())
-
-
-class TrialsCollectPipelineTest(unittest.TestCase):
-    """cli._collect_trials() — FakeSession 을 통해 실제 request 루프를 통과시켜
-    저장·RunLog 자기기록(run/run_source)·부분 결과 보존을 검증한다."""
-
-    def setUp(self):
-        handle, self.path = tempfile.mkstemp(suffix=".db")
-        os.close(handle)
-        os.unlink(self.path)
-        self.conn = repository.connect(self.path)
-        self.addCleanup(self._cleanup)
-
-    def _cleanup(self):
-        self.conn.close()
-        if os.path.exists(self.path):
-            os.unlink(self.path)
-
-    def _transport(self, responses):
-        clock, sleep, _ = make_clock_and_sleep()
-        session = FakeSession(responses)
-        return Transport(session=session, clock=clock, sleep=sleep), session
-
-    def test_a_full_run_stores_and_records_run_metadata(self):
-        transport, session = self._transport(
-            [_json_response({"totalCount": 1, "studies": [STUDY]})]
-        )
-        report = cli._collect_trials(self.conn, transport, "sunscreen", 10)
-
-        self.assertEqual(report.status, "ok")
-        self.assertEqual(len(report.records), 1)
-        self.assertIsNone(report.stopped_reason)
-        self.assertEqual(len(session.calls), 1)
-
-        stored_count = self.conn.execute("SELECT COUNT(*) FROM trial").fetchone()[0]
-        self.assertEqual(stored_count, 1)
-
-        run_row = self.conn.execute(
-            "SELECT * FROM run WHERE run_id = ?", (report.run_id,)
-        ).fetchone()
-        self.assertEqual(run_row["status"], "ok")
-        self.assertIsNotNone(run_row["finished_at"])
-        self.assertEqual(run_row["command"], "trials collect")
-
-        source_row = self.conn.execute(
-            "SELECT * FROM run_source WHERE run_id = ? AND source = 'clinicaltrials'",
-            (report.run_id,),
-        ).fetchone()
-        self.assertEqual(source_row["requests"], 1)
-        self.assertEqual(source_row["records"], 1)
-        self.assertIsNone(source_row["stopped_reason"])
-
-    def test_budget_exhausted_stops_but_keeps_already_collected_records_and_marks_partial(self):
-        responses = [
-            _json_response(
-                {"totalCount": 3, "studies": [STUDY, STUDY], "nextPageToken": "p2"}
-            ),
-            FakeResponse(402),  # BudgetExhausted
-        ]
-        transport, _ = self._transport(responses)
-        report = cli._collect_trials(self.conn, transport, "sunscreen", 10)
-
-        self.assertEqual(report.status, "partial")
-        self.assertEqual(report.stopped_reason, "budget_exhausted")
-        self.assertEqual(len(report.records), 2, "1페이지에서 이미 받은 레코드는 보존돼야 한다")
-
-        stored_count = self.conn.execute("SELECT COUNT(*) FROM trial").fetchone()[0]
-        self.assertEqual(stored_count, 1, "STUDY 가 같은 nct_id 라 한 행으로 합쳐진다")
-
-        source_row = self.conn.execute(
-            "SELECT * FROM run_source WHERE run_id = ? AND source = 'clinicaltrials'",
-            (report.run_id,),
-        ).fetchone()
-        self.assertEqual(source_row["stopped_reason"], "budget_exhausted")
-
-    def test_returns_no_records_when_the_search_finds_nothing(self):
-        transport, _ = self._transport([_json_response({"totalCount": 0, "studies": []})])
-        report = cli._collect_trials(self.conn, transport, "sunscreen", 10)
-        self.assertEqual(report.records, [])
-        self.assertEqual(report.status, "ok")
-
-    def test_calls_on_progress_once_per_collected_record_with_the_running_total(self):
-        transport, _ = self._transport(
-            [_json_response({"totalCount": 1, "studies": [STUDY]})]
-        )
-        calls = []
-        cli._collect_trials(
-            self.conn,
-            transport,
-            "sunscreen",
-            10,
-            on_progress=lambda index, total, trial: calls.append((index, total, trial.nct_id)),
-        )
-        self.assertEqual(calls, [(1, 1, "NCT01234567")])
-
-    def test_reusing_the_same_transport_after_collect_does_not_leak_into_the_finished_run(self):
-        transport, _ = self._transport(
-            [
-                _json_response({"totalCount": 1, "studies": [STUDY]}),
-                FakeResponse(200),  # collect 종료 후 같은 transport 로 보내는 요청
-            ]
-        )
-        report = cli._collect_trials(self.conn, transport, "sunscreen", 10)
-        fetch_count_after_collect = self.conn.execute(
-            "SELECT COUNT(*) FROM fetch_log WHERE run_id = ?", (report.run_id,)
-        ).fetchone()[0]
-        self.assertGreater(fetch_count_after_collect, 0)
-
-        from paper_radar.contract import Fetch, SourcePolicy
-
-        transport.request(
-            Fetch(url="https://api.example.org/x"),
-            SourcePolicy(host="api.example.org", min_interval_s=0.0),
-        )
-        fetch_count_after_reuse = self.conn.execute(
-            "SELECT COUNT(*) FROM fetch_log WHERE run_id = ?", (report.run_id,)
-        ).fetchone()[0]
-        self.assertEqual(fetch_count_after_reuse, fetch_count_after_collect)
-
-
 def trials_report(records=None, stopped_reason=None, status="ok"):
-    return cli.TrialsReport(
+    """cli.trials_collect(paper_radar.trials.collect 별칭)의 TrialsReport.
+    run/run_source 행·부분 결과 보존 등 파이프라인 레벨 검증은
+    tests/paper_radar/test_trials_collect.py 로 옮겼다 — 여기(test_cli.py)는
+    evidence collect 의 CollectOutputTest 와 같은 결로 인자 전달·출력·exit
+    code 만 본다(trials_collect.run() 을 mock.patch 로 대체)."""
+    return cli.trials_collect.TrialsReport(
         run_id="test-run", records=records or [], stopped_reason=stopped_reason, status=status
     )
 
@@ -625,8 +488,9 @@ def trial_record(**overrides):
 
 
 class TrialsCollectCliTest(unittest.TestCase):
-    """`trials collect` 의 인자 전달·출력·exit code — _collect_trials() 를
-    mock.patch 로 대체해 CollectOutputTest 와 같은 결로 검증한다."""
+    """`trials collect` 의 인자 전달·출력·exit code — trials_collect.run() 을
+    mock.patch 로 대체해 CollectOutputTest(evidence.pipeline.collect() 를
+    대체하는 것과 같은 결)로 검증한다."""
 
     def setUp(self):
         handle, self.path = tempfile.mkstemp(suffix=".db")
@@ -637,7 +501,7 @@ class TrialsCollectCliTest(unittest.TestCase):
     def _collect(self, argv, collect_return):
         output = io.StringIO()
         with (
-            mock.patch.object(cli, "_collect_trials", return_value=collect_return) as collect,
+            mock.patch.object(cli.trials_collect, "run", return_value=collect_return) as collect,
             contextlib.redirect_stdout(output),
         ):
             exit_code = cli.run(cli.parse_args(argv + ["--db", self.path]))
@@ -673,7 +537,7 @@ class TrialsCollectCliTest(unittest.TestCase):
         self.assertEqual(exit_code, 1)
 
     def test_exit_code_follows_report_status_rather_than_recomputing_it(self):
-        """partial/ok 판정은 _collect_trials() 한 곳에서만 계산한다 — CLI 는
+        """partial/ok 판정은 trials_collect.run() 한 곳에서만 계산한다 — CLI 는
         report.status 를 그대로 옮길 뿐, stopped_reason 을 다시 훑어
         재계산하지 않는다. stopped_reason 이 없어도 status="partial" 이면
         여전히 exit 1 이어야 한다."""
@@ -691,7 +555,7 @@ class TrialsCollectCliTest(unittest.TestCase):
 
         output = io.StringIO()
         with (
-            mock.patch.object(cli, "_collect_trials", side_effect=fake_collect),
+            mock.patch.object(cli.trials_collect, "run", side_effect=fake_collect),
             contextlib.redirect_stdout(output),
         ):
             cli.run(
