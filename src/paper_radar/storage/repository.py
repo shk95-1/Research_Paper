@@ -90,6 +90,11 @@ def connect(path: str) -> sqlite3.Connection:
     if directory:
         os.makedirs(directory, exist_ok=True)
     conn = sqlite3.connect(path)
+    # SQLite 는 연결마다 이 PRAGMA 를 새로 켜야 한다(DB 파일 자체에 저장되는
+    # 설정이 아니다) — 꺼진 채로 두면 m0002_runlog.py 의 "ON DELETE CASCADE"
+    # 선언이 장식으로만 남는다: run 행을 지워도 run_source/fetch_log 의 관련
+    # 행이 고아로 남아, 나중에 run 삭제 API 가 생겼을 때 조용히 데이터가 샌다.
+    conn.execute("PRAGMA foreign_keys = ON")
     conn.row_factory = sqlite3.Row
     migrate(conn)
     return conn

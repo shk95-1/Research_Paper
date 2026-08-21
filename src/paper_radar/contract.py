@@ -21,6 +21,11 @@ from typing import ClassVar, Protocol, runtime_checkable
 
 from paper_radar.transport.errors import ParseError
 
+# transport.http.Transport 가 실제로 분기하는 두 값. SourcePolicy.__post_init__
+# 이 이 집합으로 auth_kind 를 검증한다 — 여기와 transport/http.py 의 분기가
+# 갈라지면(둘 중 하나만 고치면) 이 상수가 그 어긋남을 먼저 잡는다.
+_VALID_AUTH_KINDS = frozenset({"param", "header"})
+
 
 @dataclass(frozen=True, slots=True)
 class SourcePolicy:
@@ -52,6 +57,14 @@ class SourcePolicy:
             # 어디에 넣을지 알 수 없다 — 셋은 하나의 세트로만 의미가 있다
             raise ValueError(
                 "auth_kind 를 지정했으면 auth_env 와 auth_name 도 함께 지정해야 한다"
+            )
+        if self.auth_kind is not None and self.auth_kind not in _VALID_AUTH_KINDS:
+            # transport.http 는 auth_kind 문자열을 param/header 두 갈래로만
+            # 분기한다 — 오타(예: "params", "Header")를 내면 그 분기 어디에도
+            # 안 걸려 인증이 조용히 빠진 채로 요청이 나간다. 예산·페이스는
+            # 정상으로 보이니 "인증이 빠졌다"는 사실 자체를 알아채기 어렵다.
+            raise ValueError(
+                f"auth_kind 는 {sorted(_VALID_AUTH_KINDS)} 중 하나여야 한다: {self.auth_kind!r}"
             )
 
 

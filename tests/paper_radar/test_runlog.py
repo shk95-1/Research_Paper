@@ -30,6 +30,17 @@ class ScrubUrlTest(unittest.TestCase):
     def test_leaves_a_url_without_any_query_untouched(self):
         self.assertEqual(runlog.scrub_url("https://api.example.org/x"), "https://api.example.org/x")
 
+    def test_removes_every_other_credential_looking_parameter_name(self):
+        # _CREDENTIAL_PARAM_NAMES 는 api_key 하나만이 아니다 — 소스마다 부르는
+        # 이름이 다르다(semantic_scholar 는 헤더지만 다른 소스가 미래에 쿼리
+        # 파라미터로 토큰을 쓸 수 있다). 이름마다 개별로 확인해야 한 이름의
+        # 오타(예: "apikey" 대신 "api-key")가 조용히 새는 것도 놓치지 않는다.
+        for name in ("apikey", "key", "token", "access_token", "secret", "password"):
+            with self.subTest(name=name):
+                scrubbed = runlog.scrub_url(f"https://api.example.org/x?{name}=SECRET&kept=1")
+                self.assertNotIn("SECRET", scrubbed, name)
+                self.assertIn("kept=1", scrubbed, name)
+
 
 class RunLogTest(unittest.TestCase):
     def setUp(self):

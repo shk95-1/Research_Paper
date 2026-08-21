@@ -10,7 +10,7 @@ import os
 import tempfile
 import unittest
 
-from paper_radar.storage import repository
+from paper_radar.storage import repository, runlog
 
 
 def record(**overrides):
@@ -133,6 +133,38 @@ class RepositoryTest(unittest.TestCase):
             ).fetchall()
         }
         self.assertIn("run", tables)
+
+    def test_connect_enables_foreign_key_enforcement(self):
+        # SQLite 는 연결마다 새로 켜야 한다 — 꺼진 채로 두면 run_source/
+        # fetch_log 의 "ON DELETE CASCADE" 선언이 장식으로만 남는다.
+        self.assertEqual(self.conn.execute("PRAGMA foreign_keys").fetchone()[0], 1)
+
+    def test_deleting_a_run_cascades_to_its_run_source_and_fetch_log_rows(self):
+        # run 삭제 API 는 아직 없지만(원장 deferred minor), PRAGMA 가 실제로
+        # 켜져 있어야 그 API 가 생기는 순간 이 동작을 공짜로 얻는다 — 지금
+        # DELETE FROM run 을 직접 실행해 그 계약을 미리 고정해 둔다.
+        log = runlog.RunLog(self.conn)
+        run_id = log.start("evidence collect", {})
+        log.record_source(run_id, "openalex", requests=1, records=1, errors=0)
+        log.log_fetch(
+            run_id, source="openalex", url="https://api.openalex.org/works", status=200, attempt=1
+        )
+
+        self.conn.execute("DELETE FROM run WHERE run_id = ?", (run_id,))
+        self.conn.commit()
+
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT COUNT(*) FROM run_source WHERE run_id = ?", (run_id,)
+            ).fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT COUNT(*) FROM fetch_log WHERE run_id = ?", (run_id,)
+            ).fetchone()[0],
+            0,
+        )
 
     def test_upsert_inserts_one_row(self):
         repository.upsert(self.conn, record(), verification())

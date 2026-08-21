@@ -78,6 +78,30 @@ class SourcePolicyValidationTest(unittest.TestCase):
         )
         self.assertEqual(policy.auth_name, "api_key")
 
+    def test_accepts_header_as_the_other_valid_auth_kind(self):
+        policy = SourcePolicy(
+            host="api.example.org",
+            min_interval_s=0.1,
+            auth_kind="header",
+            auth_env="EXAMPLE_API_KEY",
+            auth_name="x-api-key",
+        )
+        self.assertEqual(policy.auth_kind, "header")
+
+    def test_rejects_a_misspelled_auth_kind(self):
+        """transport.http.Transport 는 auth_kind 를 "param"/"header" 두 값으로만
+        분기한다 — 오타("params" 등)를 내면 그 분기 어디에도 안 걸려 인증이
+        조용히 빠진 채로 요청이 나간다. 예산·페이스는 정상으로 보이니 이
+        누락은 사후에 알아채기 어렵다. 그래서 생성 시점에 막는다."""
+        with self.assertRaises(ValueError):
+            SourcePolicy(
+                host="api.example.org",
+                min_interval_s=0.1,
+                auth_kind="params",  # 오타 — 올바른 값은 "param"
+                auth_env="EXAMPLE_API_KEY",
+                auth_name="api_key",
+            )
+
 
 class PayloadTest(unittest.TestCase):
     def _payload(self, body=b'{"ok": true}', status=200):
