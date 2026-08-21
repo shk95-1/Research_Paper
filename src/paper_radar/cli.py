@@ -33,7 +33,10 @@ exit code
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import sys
+from collections import defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -44,6 +47,11 @@ from paper_radar.sources import openalex
 from paper_radar.storage import repository
 from paper_radar.transport import warn
 from paper_radar.transport.http import Transport
+from paper_radar.trend import aggregate as trend_aggregate
+from paper_radar.trend import collect as trend_collect
+from paper_radar.trend import normalize as trend_normalize
+from paper_radar.trend import records as trend_records
+from paper_radar.trend import unmatched as trend_unmatched
 
 RECENT_YEARS = 10
 DEFAULT_LIMIT = 25
@@ -96,6 +104,63 @@ def parse_args(argv):
     # --db 를 서브커맨드 뒤에도 쓸 수 있게 한다
     for sub in (collect, trend, cite):
         sub.add_argument("--db", default=DEFAULT_DB, help=argparse.SUPPRESS)
+
+    # trend_group: papers_trend/ 를 이식한 별도 파이프라인(T6). "evidence trend"
+    # (연도별 논문 수 히스토그램, 위 트렌드 변수)와 이름이 겹치지 않게 최상위
+    # 그룹 이름은 "trend" 로 고르되 헷갈림을 줄이려고 서브커맨드는 collect/
+    # records/normalize/aggregate/unmatched 로 legacy `python -m papers_trend.X`
+    # 와 그대로 대응시킨다.
+    trend_group = top.add_parser("trend", help="논문 키워드 트렌드 파이프라인 (papers_trend 이식)")
+    trend_sub = trend_group.add_subparsers(dest="command", required=True)
+
+    t_collect = trend_sub.add_parser("collect", help="OpenAlex 전수 수집")
+    t_collect.add_argument(
+        "--profile", default="all", help="config.json 의 프로파일 이름, 또는 all"
+    )
+    t_collect.add_argument("--config", default=None, help="config.json 경로 (생략 시 내장 기본값)")
+    t_collect.add_argument(
+        "--dry-run", action="store_true", help="건수와 예상 요청 수만 출력하고 수집하지 않는다"
+    )
+    t_collect.add_argument(
+        "--max-pages",
+        type=int,
+        default=None,
+        help="이번 실행에서 받을 페이지 상한. 커서가 저장되므로 여러 번 나눠 전수를 채울 수 있다",
+    )
+    t_collect.add_argument("--db", default=DEFAULT_DB, help=argparse.SUPPRESS)
+
+    t_records = trend_sub.add_parser("records", help="원본 JSONL 에서 집계용 필드를 추출한다")
+    t_records.add_argument("--profile", required=True)
+    t_records.add_argument(
+        "--out", default=None, help="JSONL 출력 경로. '-' 면 stdout. 생략하면 요약만 출력"
+    )
+
+    t_normalize = trend_sub.add_parser("normalize", help="사전을 적용해 키워드를 표준키로 접는다")
+    t_normalize.add_argument("--profile", required=True)
+    t_normalize.add_argument("--top", type=int, default=20)
+
+    t_aggregate = trend_sub.add_parser("aggregate", help="JSONL -> CSV 집계. DB 를 쓰지 않는다")
+    t_aggregate.add_argument("--profile", required=True)
+    t_aggregate.add_argument("--out", default=None, help="출력 디렉터리 (생략 시 out/trend/)")
+    t_aggregate.add_argument(
+        "--allow-sample",
+        action="store_true",
+        help="전수가 아닌 데이터로도 집계한다. prevalence 가 표본 내"
+        " 비율이 된다는 것을 알고 쓸 때만",
+    )
+
+    t_unmatched = trend_sub.add_parser(
+        "unmatched", help="사전 미매칭 표현을 빈도순으로 뽑는다"
+    )
+    t_unmatched.add_argument("--profile", required=True)
+    t_unmatched.add_argument(
+        "--field",
+        default="keywords_norm",
+        choices=["keywords_norm", "topics_norm", "concepts_norm"],
+    )
+    t_unmatched.add_argument("--top", type=int, default=200, help="CSV 에 담을 상한. 0 이면 전부")
+    t_unmatched.add_argument("--show", type=int, default=25, help="화면에 출력할 개수")
+    t_unmatched.add_argument("--out", default=None)
 
     return parser.parse_args(argv)
 
@@ -211,8 +276,161 @@ def _run_cite(args):
     return 0
 
 
+def _run_trend_collect(args):
+    """`paper-radar trend collect` — papers_trend/collect_openalex.py 의 main() 이식.
+
+    프로파일별로 trend.collect.run() 을 호출한다 — 실제 수집·RunLog 기록은
+    거기서 한다. 여기서는 인자 해석과 출력만.
+    """
+    config = trend_collect.load_config(args.config) if args.config else trend_collect.load_config()
+    profiles = config["profiles"]
+    wanted = list(profiles) if args.profile == "all" else [args.profile]
+    unknown = [name for name in wanted if name not in profiles]
+    if unknown:
+        warn(f"config 에 없는 프로파일: {', '.join(unknown)}. 사용 가능: {', '.join(profiles)}")
+        return 1
+
+    if args.dry_run:
+        results = trend_collect.run(wanted, config, db_path=args.db, dry_run=True)
+        for query_id, info in results.items():
+            count = info["count"]
+            if count is None:
+                print(f"[{query_id}] 건수 확인 실패")
+                continue
+            print(f"[{query_id}] {count:,}건 -> 예상 요청 {info['estimated_requests']}회")
+        return 0
+
+    results = trend_collect.run(wanted, config, db_path=args.db, max_pages=args.max_pages)
+    if any(meta is None for meta in results.values()):
+        return 1
+    if any((meta or {}).get("stopped_reason") for meta in results.values()):
+        return 1
+    return 0
+
+
+def _run_trend_records(args):
+    """`paper-radar trend records` — papers_trend/records.py 의 main() 이식."""
+    record_list = trend_records.load_records(args.profile)
+    summary = trend_records.summarize(record_list)
+
+    if args.out:
+        # stdout 은 with 블록으로 닫으면 안 되므로 try/finally 로 실제 파일일 때만 닫는다.
+        stream = sys.stdout if args.out == "-" else open(args.out, "w", encoding="utf-8")  # noqa: SIM115
+        try:
+            for record in record_list:
+                stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+        finally:
+            if stream is not sys.stdout:
+                stream.close()
+        if args.out != "-":
+            print(f"{len(record_list):,}건 -> {args.out}", file=sys.stderr)
+
+    report_stream = sys.stderr if args.out == "-" else sys.stdout
+    print(f"[{args.profile}] 레코드 {summary['total']:,}건", file=report_stream)
+    print(f"  date_precision: {summary['date_precision']}", file=report_stream)
+    print(
+        f"  월별 집계 제외 (month_bucket 없음): {summary['excluded_from_monthly']:,}건",
+        file=report_stream,
+    )
+    print(f"  DOI 보유: {summary['with_doi']:,}건", file=report_stream)
+    print(
+        f"  고유 keywords {summary['unique_keywords']:,} / "
+        f"topics {summary['unique_topics']:,} / "
+        f"concepts {summary['unique_concepts']:,}",
+        file=report_stream,
+    )
+    print(
+        f"  월 범위: {min(summary['months'], default='-')} ~ "
+        f"{max(summary['months'], default='-')} ({len(summary['months'])}개월)",
+        file=report_stream,
+    )
+    return 0
+
+
+def _run_trend_normalize(args):
+    """`paper-radar trend normalize` — papers_trend/normalize.py 의 main() 이식."""
+    entries, alias_map = trend_normalize.load_lexicon()
+    stopwords = trend_normalize.load_stopwords()
+    record_list = trend_records.load_records(args.profile)
+    normalized = trend_normalize.normalize_all(record_list, alias_map, entries, stopwords)
+
+    print(f"[{args.profile}] 레코드 {len(record_list):,}건")
+    print(f"  사전 항목 {len(entries)}개, 별칭 {len(alias_map)}개, 불용어 {len(stopwords)}개\n")
+
+    print("=== 정규화 전/후 고유 표현 수 ===")
+    for field, stat in trend_normalize.summarize(record_list, normalized).items():
+        print(
+            f"  {field:9} {stat['unique_before']:>6,} -> {stat['unique_after']:>6,}"
+            f"  (감소 {stat['reduction']:,} / 사전 적중 {stat['lexicon_keys_hit']}개)"
+        )
+
+    print(f"\n=== 불용어·정규화 전 상위 {args.top} (keywords 원본) ===")
+    for term, count in trend_normalize.top_raw_terms(record_list, "keywords", args.top):
+        print(f"  {count:>5}  {term}")
+
+    print(f"\n=== 불용어·정규화 후 상위 {args.top} (keywords) ===")
+    for term, count in trend_normalize.top_terms(normalized, "keywords_norm", args.top):
+        print(f"  {count:>5}  {term}")
+    return 0
+
+
+def _run_trend_aggregate(args):
+    """`paper-radar trend aggregate` — papers_trend/aggregate.py 의 main() 이식.
+
+    CensusError 를 여기서 잡아 기존 SystemExit 과 같은 메시지를 stderr 로
+    내고 exit code 1 로 옮긴다 — trend.aggregate.census_guard() 의 docstring
+    참조(라이브러리가 프로세스를 직접 죽이지 않는 이유).
+    """
+    try:
+        result = trend_aggregate.run(args.profile, out_dir=args.out, allow_sample=args.allow_sample)
+    except trend_aggregate.CensusError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    print(f"[{args.profile}] 레코드 {result['records']:,}건, {result['months']}개월")
+    for name, count in result["written"].items():
+        print(f"  {name:26} {count:>7,}행")
+    print(f"  provisional (색인 미완 추정): {', '.join(result['provisional']) or '없음'}")
+    print(f"  low_sample: {', '.join(result['low_sample']) or '없음'}")
+
+    classes = defaultdict(int)
+    for row in result["metrics"]:
+        classes[row["trend_class"]] += 1
+    print(f"  trend_class: {dict(sorted(classes.items()))}")
+    return 0
+
+
+def _run_trend_unmatched(args):
+    """`paper-radar trend unmatched` — papers_trend/unmatched.py 의 main() 이식."""
+    result = trend_unmatched.run(args.profile, field=args.field, top=args.top, out_path=args.out)
+    rows = result["rows"]
+    print(
+        f"[{args.profile}] {args.field} 미매칭 표현 {result['total_terms']:,}종, "
+        f"등장 {result['total_hits']:,}회"
+    )
+    print(f"  -> {result['target']} ({len(rows):,}행)")
+    print("  verdict 컬럼을 사람이 채운다: lexicon / stopword / keep\n")
+
+    print(f"=== 상위 {args.show} ===")
+    for row in rows[: args.show]:
+        print(
+            f"  {row['rank']:>3}. {row['paper_count']:>5}편  "
+            f"{row['months_present']:>2}개월  {row['term']}"
+        )
+        if row["example_title_1"]:
+            print(f"        예: {row['example_title_1'][:88]}")
+    return 0
+
+
 COMMANDS = {"collect": _run_collect, "trend": _run_trend, "cite": _run_cite}
-GROUPS = {"evidence": COMMANDS}
+TREND_COMMANDS = {
+    "collect": _run_trend_collect,
+    "records": _run_trend_records,
+    "normalize": _run_trend_normalize,
+    "aggregate": _run_trend_aggregate,
+    "unmatched": _run_trend_unmatched,
+}
+GROUPS = {"evidence": COMMANDS, "trend": TREND_COMMANDS}
 
 
 def run(args):
