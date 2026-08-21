@@ -2,6 +2,7 @@
 data/
 __pycache__/
 *.pyc
+.venv/
 papers/out/
 # 원본 JSONL 은 303MB 라 올리지 않는다. out/ 의 CSV 는 올린다.
 papers_trend/raw/

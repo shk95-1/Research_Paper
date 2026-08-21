@@ -61,11 +61,16 @@ class ParseArgsTest(unittest.TestCase):
 
 class TrendOutputTest(unittest.TestCase):
     def setUp(self):
-        # 테스트는 .env 를 읽지 않으므로 이메일 경고가 항상 뜬다.
+        # 테스트는 .env 를 읽지 않으므로 자격 증명 경고가 항상 뜬다.
         # 경고 자체는 CollectOutputTest 에서 검증한다.
         patcher = mock.patch.object(cli.http, "contact_email", return_value="a@b.com")
         patcher.start()
         self.addCleanup(patcher.stop)
+        env_patcher = mock.patch.dict(
+            "os.environ", {"OPENALEX_API_KEY": "test-key"}, clear=False
+        )
+        env_patcher.start()
+        self.addCleanup(env_patcher.stop)
 
     def test_prints_a_row_per_year_with_the_count(self):
         with mock.patch.object(cli.openalex, "trend", return_value=[(2016, 90), (2017, 120)]):
@@ -138,6 +143,7 @@ class CollectOutputTest(unittest.TestCase):
 
     def test_reports_how_many_papers_were_stored(self):
         self.enterContext(mock.patch.object(cli.http, "contact_email", return_value="a@b.com"))
+        self.enterContext(mock.patch.dict("os.environ", {"OPENALEX_API_KEY": "test-key"}, clear=False))
         collected = [record(), record(doi="10.1/b")]
         with mock.patch.object(cli.pipeline, "collect", return_value=collected):
             output = io.StringIO()
@@ -150,6 +156,7 @@ class CollectOutputTest(unittest.TestCase):
 
     def test_passes_the_parsed_arguments_through_to_the_pipeline(self):
         self.enterContext(mock.patch.object(cli.http, "contact_email", return_value="a@b.com"))
+        self.enterContext(mock.patch.dict("os.environ", {"OPENALEX_API_KEY": "test-key"}, clear=False))
         with mock.patch.object(cli.pipeline, "collect", return_value=[]) as collect:
             with contextlib.redirect_stdout(io.StringIO()):
                 cli.run(cli.parse_args([
@@ -180,6 +187,31 @@ class CollectOutputTest(unittest.TestCase):
                             ["collect", "--query", "cosmetic", "--db", self.path]
                         ))
         self.assertNotIn("OPENALEX_EMAIL", stderr.getvalue())
+
+    def test_warns_when_no_openalex_api_key_is_configured(self):
+        with mock.patch.dict("os.environ", {"OPENALEX_API_KEY": ""}, clear=False):
+            with mock.patch.object(cli.http, "contact_email", return_value="a@b.com"):
+                with mock.patch.object(cli.pipeline, "collect", return_value=[]):
+                    stderr = io.StringIO()
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        with contextlib.redirect_stderr(stderr):
+                            cli.run(cli.parse_args(
+                                ["collect", "--query", "cosmetic", "--db", self.path]
+                            ))
+        self.assertIn("OPENALEX_API_KEY", stderr.getvalue())
+        self.assertIn("1,000크레딧", stderr.getvalue())
+
+    def test_stays_quiet_about_the_api_key_when_one_is_configured(self):
+        with mock.patch.dict("os.environ", {"OPENALEX_API_KEY": "secret"}, clear=False):
+            with mock.patch.object(cli.http, "contact_email", return_value="a@b.com"):
+                with mock.patch.object(cli.pipeline, "collect", return_value=[]):
+                    stderr = io.StringIO()
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        with contextlib.redirect_stderr(stderr):
+                            cli.run(cli.parse_args(
+                                ["collect", "--query", "cosmetic", "--db", self.path]
+                            ))
+        self.assertNotIn("OPENALEX_API_KEY", stderr.getvalue())
 
 
 if __name__ == "__main__":

@@ -168,14 +168,10 @@ class SearchTest(unittest.TestCase):
             openalex.search("cosmetic", 2016, 2026, limit=1)
         self.assertIn("abstract_inverted_index", get_json.call_args.kwargs["params"]["select"])
 
-    def test_includes_mailto_when_the_contact_email_is_configured(self):
+    def test_never_sends_mailto_even_when_a_contact_email_is_configured(self):
+        # 2026-02-13부터 OpenAlex 가 mailto/polite pool 을 폐지했다. 이메일이
+        # 설정돼 있어도 파라미터로는 보내지 않는다 (User-Agent 전송은 http.py 의 몫).
         with mock.patch.object(openalex.http, "contact_email", return_value="a@b.com"):
-            with mock.patch.object(openalex.http, "get_json", return_value={"results": [WORK]}) as get_json:
-                openalex.search("cosmetic", 2016, 2026, limit=1)
-        self.assertEqual(get_json.call_args.kwargs["params"]["mailto"], "a@b.com")
-
-    def test_omits_mailto_when_no_email_is_configured(self):
-        with mock.patch.object(openalex.http, "contact_email", return_value=""):
             with mock.patch.object(openalex.http, "get_json", return_value={"results": [WORK]}) as get_json:
                 openalex.search("cosmetic", 2016, 2026, limit=1)
         self.assertNotIn("mailto", get_json.call_args.kwargs["params"])

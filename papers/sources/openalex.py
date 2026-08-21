@@ -117,9 +117,9 @@ def _filter(query, year_from, year_to):
 
 
 def _polite(params):
-    email = http.contact_email()
-    if email:
-        params["mailto"] = email
+    # mailto 는 여기서 더 이상 보내지 않는다: 2026-02-13부터 OpenAlex 가 mailto/polite
+    # pool 자체를 폐지했다. 파라미터를 계속 보내면 코드가 그 폐지 사실을 모르는 것처럼
+    # 보이므로 아예 뺀다 (User-Agent 의 mailto 는 Crossref 용으로 http.py 가 유지한다).
     api_key = os.environ.get("OPENALEX_API_KEY", "").strip()
     if api_key:
         params["api_key"] = api_key

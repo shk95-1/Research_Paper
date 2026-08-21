@@ -61,16 +61,22 @@ def parse_args(argv):
     return parser.parse_args(argv)
 
 
-def _check_email():
+def _check_credentials():
+    if not os.environ.get("OPENALEX_API_KEY", "").strip():
+        http.warn(
+            "OPENALEX_API_KEY 가 없어 무인증 예산(하루 1,000크레딧, search 기준 ~100건)"
+            "으로 동작합니다. 무료 키를 등록하면 하루 100,000크레딧으로 늘어납니다."
+        )
     if not http.contact_email():
         http.warn(
-            "OPENALEX_EMAIL 이 없어 polite pool 을 쓰지 않습니다. "
-            "429 가 잦아질 수 있습니다. .env 에 추가하세요."
+            "OPENALEX_EMAIL 이 없습니다. OpenAlex 의 polite pool 은 2026-02-13 폐지"
+            "됐지만, 이 값은 Crossref polite 풀 연락처로는 여전히 쓰입니다. "
+            ".env 에 추가하세요."
         )
 
 
 def _run_collect(args):
-    _check_email()
+    _check_credentials()
     print(f"검색: {args.query!r}  기간: {args.year_from}~{args.year_to}  상한: {args.limit}건")
 
     def progress(index, total, record):
@@ -98,7 +104,7 @@ def _run_collect(args):
 
 
 def _run_trend(args):
-    _check_email()
+    _check_credentials()
     counts = openalex.trend(args.query, args.year_from, args.year_to)
     if not counts:
         print("결과가 없습니다.")

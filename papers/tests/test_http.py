@@ -142,6 +142,80 @@ class GetJsonTest(unittest.TestCase):
         self.assertEqual(session.calls[0]["params"], {"filter": "x"})
         self.assertEqual(session.calls[0]["headers"], {"x-api-key": "k"})
 
+    def test_returns_none_on_402_without_retrying(self):
+        # OpenAlex 2026-02-13 계량제: 402 는 일일 예산 소진. 재시도해도 자정
+        # 전에는 회복되지 않으므로 즉시 포기해야 한다.
+        result, session = self._run([FakeResponse(402)])
+        self.assertIsNone(result)
+        self.assertEqual(len(session.calls), 1)
+
+    def test_returns_none_on_409_without_retrying(self):
+        result, session = self._run([FakeResponse(409)])
+        self.assertIsNone(result)
+        self.assertEqual(len(session.calls), 1)
+
+    def test_warns_about_budget_exhaustion_on_402(self):
+        self._run([FakeResponse(402)])
+        self.assertIn("예산 소진", self.stderr.getvalue())
+
+
+class BudgetRemainingTest(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.object(http.time, "sleep")
+        self.sleep = patcher.start()
+        self.addCleanup(patcher.stop)
+        http._last_call.clear()
+        http._budget_remaining.clear()
+        http._budget_warned.clear()
+        self.addCleanup(http._budget_remaining.clear)
+        self.addCleanup(http._budget_warned.clear)
+        self.stderr = io.StringIO()
+
+    def _run(self, responses, **kwargs):
+        session = FakeSession(responses)
+        with mock.patch.object(http, "session", return_value=session):
+            with contextlib.redirect_stderr(self.stderr):
+                result = http.get_json("https://api.openalex.org/works", **kwargs)
+        return result, session
+
+    def test_is_none_before_any_response_is_observed(self):
+        self.assertIsNone(http.budget_remaining("api.openalex.org"))
+
+    def test_updates_from_the_ratelimit_remaining_header(self):
+        self._run([FakeResponse(200, {"ok": True}, headers={"x-ratelimit-remaining": "97600"})])
+        self.assertEqual(http.budget_remaining("api.openalex.org"), 97600)
+
+    def test_keeps_the_most_recent_value_across_calls(self):
+        self._run([FakeResponse(200, {"a": 1}, headers={"x-ratelimit-remaining": "500"})])
+        self._run([FakeResponse(200, {"b": 2}, headers={"x-ratelimit-remaining": "400"})])
+        self.assertEqual(http.budget_remaining("api.openalex.org"), 400)
+
+    def test_warns_once_when_remaining_first_drops_below_the_threshold(self):
+        self._run([FakeResponse(200, {}, headers={"x-ratelimit-remaining": "50"})])
+        self.assertEqual(self.stderr.getvalue().count("남은 예산"), 1)
+
+    def test_does_not_warn_again_on_a_further_drop_for_the_same_host(self):
+        self._run([FakeResponse(200, {}, headers={"x-ratelimit-remaining": "50"})])
+        self._run([FakeResponse(200, {}, headers={"x-ratelimit-remaining": "10"})])
+        self.assertEqual(self.stderr.getvalue().count("남은 예산"), 1)
+
+    def test_does_not_warn_while_remaining_stays_above_the_threshold(self):
+        self._run([FakeResponse(200, {}, headers={"x-ratelimit-remaining": "97600"})])
+        self.assertNotIn("남은 예산", self.stderr.getvalue())
+
+
+class IntervalConstantsTest(unittest.TestCase):
+    def test_crossref_interval_stays_under_the_polite_pool_single_doi_cap(self):
+        # 2025-12-01 정책: polite 풀 단건 DOI 10req/s 상한. 0.2s = 5req/s 로 여유.
+        self.assertEqual(http.MIN_INTERVAL["api.crossref.org"], 0.2)
+
+    def test_semantic_scholar_keyed_interval_matches_the_standard_free_key_cap(self):
+        # 표준 무료 키는 1req/s 상한이다.
+        self.assertEqual(http.SEMANTIC_SCHOLAR_KEYED_INTERVAL, 1.0)
+
+    def test_budget_status_does_not_overlap_retry_status(self):
+        self.assertEqual(http.BUDGET_STATUS & http.RETRY_STATUS, set())
+
 
 if __name__ == "__main__":
     unittest.main()
