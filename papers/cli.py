@@ -9,7 +9,7 @@ collect 와 trend 는 네트워크를 쓴다. cite 는 로컬 DB 만 읽는다.
 
 import argparse
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from dotenv import load_dotenv
 
@@ -23,7 +23,7 @@ ABSTRACT_PREVIEW = 300
 
 def _default_years():
     """기본은 최근 10년. 오래된 논문은 처방과 규제가 이미 바뀌었을 수 있다."""
-    this_year = datetime.now(timezone.utc).year
+    this_year = datetime.now(UTC).year
     return this_year - (RECENT_YEARS - 1), this_year
 
 
@@ -87,8 +87,13 @@ def _run_collect(args):
     conn = store.connect(args.db)
     try:
         records = pipeline.collect(
-            conn, args.query, args.year_from, args.year_to, args.limit,
-            json_path=args.json_path, on_progress=progress,
+            conn,
+            args.query,
+            args.year_from,
+            args.year_to,
+            args.limit,
+            json_path=args.json_path,
+            on_progress=progress,
         )
     finally:
         conn.close()
@@ -122,7 +127,8 @@ def _run_cite(args):
     conn = store.connect(args.db)
     try:
         found = store.search(
-            conn, args.keyword,
+            conn,
+            args.keyword,
             min_confidence=args.min_confidence,
             include_retracted=args.include_retracted,
             limit=args.limit,
@@ -140,11 +146,15 @@ def _run_cite(args):
         authors = record.get("authors") or []
         byline = authors[0] + (" 외" if len(authors) > 1 else "") if authors else "저자 미상"
         print(f"[{index}] {record.get('title') or '(제목 없음)'}")
-        print(f"    {byline} ({record.get('year') or '연도 미상'})"
-              f"  {record.get('journal') or '저널 미상'}")
-        print(f"    신뢰도 {verification.get('confidence_score', 0)}점"
-              f"  인용 {record.get('citation_count') or 0}회"
-              f"  출처 {', '.join(verification.get('found_in_sources') or [])}")
+        print(
+            f"    {byline} ({record.get('year') or '연도 미상'})"
+            f"  {record.get('journal') or '저널 미상'}"
+        )
+        print(
+            f"    신뢰도 {verification.get('confidence_score', 0)}점"
+            f"  인용 {record.get('citation_count') or 0}회"
+            f"  출처 {', '.join(verification.get('found_in_sources') or [])}"
+        )
         if not verification.get("has_doi"):
             print("    DOI 없음")
         elif record.get("doi"):

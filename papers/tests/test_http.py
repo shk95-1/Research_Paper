@@ -99,10 +99,12 @@ class GetJsonTest(unittest.TestCase):
         self.assertEqual(len(session.calls), 1)
 
     def test_retries_on_429_then_succeeds(self):
-        result, session = self._run([
-            FakeResponse(429, headers={"Retry-After": "40"}),
-            FakeResponse(200, {"ok": True}),
-        ])
+        result, session = self._run(
+            [
+                FakeResponse(429, headers={"Retry-After": "40"}),
+                FakeResponse(200, {"ok": True}),
+            ]
+        )
         self.assertEqual(result, {"ok": True})
         self.assertEqual(len(session.calls), 2)
         self.sleep.assert_any_call(40.0)
@@ -114,10 +116,13 @@ class GetJsonTest(unittest.TestCase):
 
     def test_survives_network_exception_and_retries(self):
         import requests
-        result, session = self._run([
-            requests.RequestException("연결 끊김"),
-            FakeResponse(200, {"ok": True}),
-        ])
+
+        result, session = self._run(
+            [
+                requests.RequestException("연결 끊김"),
+                FakeResponse(200, {"ok": True}),
+            ]
+        )
         self.assertEqual(result, {"ok": True})
 
     def test_returns_none_on_unparsable_json(self):

@@ -22,11 +22,24 @@ from .. import http
 BASE = "https://api.openalex.org/works"
 
 # 쓰는 필드만 요청한다. 응답 meta 에 cost_usd 가 있어 OpenAlex 가 사용량을 계량한다.
-SELECT = ",".join([
-    "id", "doi", "title", "publication_year", "abstract_inverted_index",
-    "is_retracted", "cited_by_count", "open_access", "primary_location",
-    "topics", "keywords", "authorships", "type", "language",
-])
+SELECT = ",".join(
+    [
+        "id",
+        "doi",
+        "title",
+        "publication_year",
+        "abstract_inverted_index",
+        "is_retracted",
+        "cited_by_count",
+        "open_access",
+        "primary_location",
+        "topics",
+        "keywords",
+        "authorships",
+        "type",
+        "language",
+    ]
+)
 
 PER_PAGE_MAX = 200
 # group_by 응답은 per-page 에 잘린다. 실측에서 per-page=1 이면 연도 1개만 왔다.
@@ -59,7 +72,7 @@ def bare_doi(value):
     doi = value.strip().lower()
     for prefix in DOI_PREFIXES:
         if doi.startswith(prefix):
-            doi = doi[len(prefix):]
+            doi = doi[len(prefix) :]
             break
     return doi or None
 
@@ -109,11 +122,13 @@ def to_record(work):
 
 
 def _filter(query, year_from, year_to):
-    return ",".join([
-        f"title_and_abstract.search:{query}",
-        f"from_publication_date:{year_from}-01-01",
-        f"to_publication_date:{year_to}-12-31",
-    ])
+    return ",".join(
+        [
+            f"title_and_abstract.search:{query}",
+            f"from_publication_date:{year_from}-01-01",
+            f"to_publication_date:{year_to}-12-31",
+        ]
+    )
 
 
 def _polite(params):
@@ -131,12 +146,14 @@ def search(query, year_from, year_to, limit):
     records = []
     cursor = "*"
     while len(records) < limit and cursor:
-        params = _polite({
-            "filter": _filter(query, year_from, year_to),
-            "select": SELECT,
-            "per-page": min(PER_PAGE_MAX, limit - len(records)),
-            "cursor": cursor,
-        })
+        params = _polite(
+            {
+                "filter": _filter(query, year_from, year_to),
+                "select": SELECT,
+                "per-page": min(PER_PAGE_MAX, limit - len(records)),
+                "cursor": cursor,
+            }
+        )
         payload = http.get_json(BASE, params=params)
         if not payload:
             break
@@ -150,11 +167,13 @@ def search(query, year_from, year_to, limit):
 
 def trend(query, year_from, year_to):
     """[(연도, 논문수), ...] 오름차순. 논문 본문을 받지 않으므로 호출 1회."""
-    params = _polite({
-        "filter": _filter(query, year_from, year_to),
-        "group_by": "publication_year",
-        "per-page": GROUP_PER_PAGE,
-    })
+    params = _polite(
+        {
+            "filter": _filter(query, year_from, year_to),
+            "group_by": "publication_year",
+            "per-page": GROUP_PER_PAGE,
+        }
+    )
     payload = http.get_json(BASE, params=params)
     groups = (payload or {}).get("group_by") or []
     counts = []

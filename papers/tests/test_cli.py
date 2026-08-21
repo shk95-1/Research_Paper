@@ -17,9 +17,7 @@ class ParseArgsTest(unittest.TestCase):
         self.assertEqual(args.year_to - args.year_from, 9)
 
     def test_collect_reads_an_explicit_year_range(self):
-        args = cli.parse_args(
-            ["collect", "--query", "cosmetic", "--from", "2016", "--to", "2026"]
-        )
+        args = cli.parse_args(["collect", "--query", "cosmetic", "--from", "2016", "--to", "2026"])
         self.assertEqual((args.year_from, args.year_to), (2016, 2026))
 
     def test_collect_defaults_the_limit_to_twenty_five(self):
@@ -66,9 +64,7 @@ class TrendOutputTest(unittest.TestCase):
         patcher = mock.patch.object(cli.http, "contact_email", return_value="a@b.com")
         patcher.start()
         self.addCleanup(patcher.stop)
-        env_patcher = mock.patch.dict(
-            "os.environ", {"OPENALEX_API_KEY": "test-key"}, clear=False
-        )
+        env_patcher = mock.patch.dict("os.environ", {"OPENALEX_API_KEY": "test-key"}, clear=False)
         env_patcher.start()
         self.addCleanup(env_patcher.stop)
 
@@ -143,26 +139,43 @@ class CollectOutputTest(unittest.TestCase):
 
     def test_reports_how_many_papers_were_stored(self):
         self.enterContext(mock.patch.object(cli.http, "contact_email", return_value="a@b.com"))
-        self.enterContext(mock.patch.dict("os.environ", {"OPENALEX_API_KEY": "test-key"}, clear=False))
+        self.enterContext(
+            mock.patch.dict("os.environ", {"OPENALEX_API_KEY": "test-key"}, clear=False)
+        )
         collected = [record(), record(doi="10.1/b")]
         with mock.patch.object(cli.pipeline, "collect", return_value=collected):
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                exit_code = cli.run(cli.parse_args(
-                    ["collect", "--query", "cosmetic", "--db", self.path]
-                ))
+                exit_code = cli.run(
+                    cli.parse_args(["collect", "--query", "cosmetic", "--db", self.path])
+                )
         self.assertEqual(exit_code, 0)
         self.assertIn("2", output.getvalue())
 
     def test_passes_the_parsed_arguments_through_to_the_pipeline(self):
         self.enterContext(mock.patch.object(cli.http, "contact_email", return_value="a@b.com"))
-        self.enterContext(mock.patch.dict("os.environ", {"OPENALEX_API_KEY": "test-key"}, clear=False))
+        self.enterContext(
+            mock.patch.dict("os.environ", {"OPENALEX_API_KEY": "test-key"}, clear=False)
+        )
         with mock.patch.object(cli.pipeline, "collect", return_value=[]) as collect:
             with contextlib.redirect_stdout(io.StringIO()):
-                cli.run(cli.parse_args([
-                    "collect", "--query", "cosmetic retinol", "--from", "2016",
-                    "--to", "2026", "--limit", "7", "--db", self.path,
-                ]))
+                cli.run(
+                    cli.parse_args(
+                        [
+                            "collect",
+                            "--query",
+                            "cosmetic retinol",
+                            "--from",
+                            "2016",
+                            "--to",
+                            "2026",
+                            "--limit",
+                            "7",
+                            "--db",
+                            self.path,
+                        ]
+                    )
+                )
         _, query, year_from, year_to, limit = collect.call_args.args
         self.assertEqual((query, year_from, year_to, limit), ("cosmetic retinol", 2016, 2026, 7))
 
@@ -172,9 +185,9 @@ class CollectOutputTest(unittest.TestCase):
                 stderr = io.StringIO()
                 with contextlib.redirect_stdout(io.StringIO()):
                     with contextlib.redirect_stderr(stderr):
-                        cli.run(cli.parse_args(
-                            ["collect", "--query", "cosmetic", "--db", self.path]
-                        ))
+                        cli.run(
+                            cli.parse_args(["collect", "--query", "cosmetic", "--db", self.path])
+                        )
         self.assertIn("OPENALEX_EMAIL", stderr.getvalue())
 
     def test_stays_quiet_about_email_when_one_is_configured(self):
@@ -183,9 +196,9 @@ class CollectOutputTest(unittest.TestCase):
                 stderr = io.StringIO()
                 with contextlib.redirect_stdout(io.StringIO()):
                     with contextlib.redirect_stderr(stderr):
-                        cli.run(cli.parse_args(
-                            ["collect", "--query", "cosmetic", "--db", self.path]
-                        ))
+                        cli.run(
+                            cli.parse_args(["collect", "--query", "cosmetic", "--db", self.path])
+                        )
         self.assertNotIn("OPENALEX_EMAIL", stderr.getvalue())
 
     def test_warns_when_no_openalex_api_key_is_configured(self):
@@ -195,9 +208,11 @@ class CollectOutputTest(unittest.TestCase):
                     stderr = io.StringIO()
                     with contextlib.redirect_stdout(io.StringIO()):
                         with contextlib.redirect_stderr(stderr):
-                            cli.run(cli.parse_args(
-                                ["collect", "--query", "cosmetic", "--db", self.path]
-                            ))
+                            cli.run(
+                                cli.parse_args(
+                                    ["collect", "--query", "cosmetic", "--db", self.path]
+                                )
+                            )
         self.assertIn("OPENALEX_API_KEY", stderr.getvalue())
         self.assertIn("1,000크레딧", stderr.getvalue())
 
@@ -208,9 +223,11 @@ class CollectOutputTest(unittest.TestCase):
                     stderr = io.StringIO()
                     with contextlib.redirect_stdout(io.StringIO()):
                         with contextlib.redirect_stderr(stderr):
-                            cli.run(cli.parse_args(
-                                ["collect", "--query", "cosmetic", "--db", self.path]
-                            ))
+                            cli.run(
+                                cli.parse_args(
+                                    ["collect", "--query", "cosmetic", "--db", self.path]
+                                )
+                            )
         self.assertNotIn("OPENALEX_API_KEY", stderr.getvalue())
 
 

@@ -100,7 +100,9 @@ def assign_paper_weights(record_list):
                 percentile_by_index[index] = None
             continue
         counts = [record_list[i].get("citation_count") or 0 for i in indexes]
-        for index, percentile in zip(indexes, cohort_percentiles(counts)):
+        # strict=False: counts 는 indexes 에서 직접 만들어 길이가 항상 같지만,
+        # 기존 zip 동작(길이 불일치 시 조용히 자름)을 그대로 유지한다.
+        for index, percentile in zip(indexes, cohort_percentiles(counts), strict=False):
             percentile_by_index[index] = percentile
 
     result = []

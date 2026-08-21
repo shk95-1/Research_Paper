@@ -119,9 +119,7 @@ class ToRecordTest(unittest.TestCase):
         self.assertEqual(self.record["authors"], ["D. Comiskey", "A. M. Api"])
 
     def test_flattens_topics_and_keywords_to_display_names(self):
-        self.assertEqual(
-            self.record["topics"], ["Contact Dermatitis and Allergies", "Toxicology"]
-        )
+        self.assertEqual(self.record["topics"], ["Contact Dermatitis and Allergies", "Toxicology"])
         self.assertEqual(self.record["keywords"], ["Product (mathematics)", "Medicine"])
 
     def test_reads_open_access_from_the_nested_flag(self):
@@ -156,7 +154,9 @@ class ToRecordTest(unittest.TestCase):
 
 class SearchTest(unittest.TestCase):
     def test_builds_a_title_and_abstract_filter_with_the_year_range(self):
-        with mock.patch.object(openalex.http, "get_json", return_value={"results": [WORK]}) as get_json:
+        with mock.patch.object(
+            openalex.http, "get_json", return_value={"results": [WORK]}
+        ) as get_json:
             openalex.search("cosmetic retinol", 2016, 2026, limit=1)
         params = get_json.call_args.kwargs["params"]
         self.assertIn("title_and_abstract.search:cosmetic retinol", params["filter"])
@@ -164,7 +164,9 @@ class SearchTest(unittest.TestCase):
         self.assertIn("to_publication_date:2026-12-31", params["filter"])
 
     def test_requests_only_the_fields_it_uses(self):
-        with mock.patch.object(openalex.http, "get_json", return_value={"results": [WORK]}) as get_json:
+        with mock.patch.object(
+            openalex.http, "get_json", return_value={"results": [WORK]}
+        ) as get_json:
             openalex.search("cosmetic", 2016, 2026, limit=1)
         self.assertIn("abstract_inverted_index", get_json.call_args.kwargs["params"]["select"])
 
@@ -172,13 +174,17 @@ class SearchTest(unittest.TestCase):
         # 2026-02-13부터 OpenAlex 가 mailto/polite pool 을 폐지했다. 이메일이
         # 설정돼 있어도 파라미터로는 보내지 않는다 (User-Agent 전송은 http.py 의 몫).
         with mock.patch.object(openalex.http, "contact_email", return_value="a@b.com"):
-            with mock.patch.object(openalex.http, "get_json", return_value={"results": [WORK]}) as get_json:
+            with mock.patch.object(
+                openalex.http, "get_json", return_value={"results": [WORK]}
+            ) as get_json:
                 openalex.search("cosmetic", 2016, 2026, limit=1)
         self.assertNotIn("mailto", get_json.call_args.kwargs["params"])
 
     def test_sends_the_api_key_only_when_one_is_set(self):
         with mock.patch.dict("os.environ", {"OPENALEX_API_KEY": "secret"}, clear=False):
-            with mock.patch.object(openalex.http, "get_json", return_value={"results": [WORK]}) as get_json:
+            with mock.patch.object(
+                openalex.http, "get_json", return_value={"results": [WORK]}
+            ) as get_json:
                 openalex.search("cosmetic", 2016, 2026, limit=1)
         self.assertEqual(get_json.call_args.kwargs["params"]["api_key"], "secret")
 
@@ -211,10 +217,12 @@ class SearchTest(unittest.TestCase):
 
 class TrendTest(unittest.TestCase):
     def test_groups_by_publication_year_and_sorts_ascending(self):
-        payload = {"group_by": [
-            {"key": "2025", "count": 18737},
-            {"key": "2016", "count": 9000},
-        ]}
+        payload = {
+            "group_by": [
+                {"key": "2025", "count": 18737},
+                {"key": "2016", "count": 9000},
+            ]
+        }
         with mock.patch.object(openalex.http, "get_json", return_value=payload) as get_json:
             result = openalex.trend("cosmetic", 2016, 2026)
         self.assertEqual(result, [(2016, 9000), (2025, 18737)])
@@ -222,7 +230,9 @@ class TrendTest(unittest.TestCase):
 
     def test_asks_for_enough_groups_to_cover_every_year(self):
         # per-page 가 그룹 수를 자른다. 실측에서 per-page=1 이면 1개 연도만 왔다.
-        with mock.patch.object(openalex.http, "get_json", return_value={"group_by": []}) as get_json:
+        with mock.patch.object(
+            openalex.http, "get_json", return_value={"group_by": []}
+        ) as get_json:
             openalex.trend("cosmetic", 2016, 2026)
         self.assertGreaterEqual(get_json.call_args.kwargs["params"]["per-page"], 200)
 

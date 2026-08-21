@@ -50,9 +50,7 @@ class FetchTest(unittest.TestCase):
 
     def test_puts_the_doi_in_the_request_path(self):
         _, get_json = self._fetch(PAYLOAD, doi="10.1016/j.yrtph.2017.05.017")
-        self.assertTrue(
-            get_json.call_args.args[0].endswith("10.1016/j.yrtph.2017.05.017")
-        )
+        self.assertTrue(get_json.call_args.args[0].endswith("10.1016/j.yrtph.2017.05.017"))
 
     def test_returns_none_when_the_doi_is_unknown(self):
         # http.get_json 은 404 를 None 으로 흡수한다. 그것이 미검증의 근거다.

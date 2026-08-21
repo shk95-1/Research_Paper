@@ -15,7 +15,9 @@ PAYLOAD = {
                 "source": "MED",
                 "title": "Integrating habits and practices data for soaps and cosmetics",
                 "abstractText": "Aggregate exposure to fragrance ingredients was modelled.",
-                "journalInfo": {"journal": {"title": "Regulatory toxicology and pharmacology : RTP"}},
+                "journalInfo": {
+                    "journal": {"title": "Regulatory toxicology and pharmacology : RTP"}
+                },
                 "keywordList": {
                     "keyword": ["Database", "Cosmetics", "Personal Care", "Fragrance Ingredients"]
                 },
@@ -50,9 +52,7 @@ class FetchTest(unittest.TestCase):
     def test_strips_double_quotes_out_of_a_title_query(self):
         # 제목 안의 따옴표가 쿼리 문법을 깨뜨린다
         _, get_json = self._fetch(PAYLOAD, doi=None, title='A "quoted" title')
-        self.assertEqual(
-            get_json.call_args.kwargs["params"]["query"], 'TITLE:"A quoted title"'
-        )
+        self.assertEqual(get_json.call_args.kwargs["params"]["query"], 'TITLE:"A quoted title"')
 
     def test_requests_the_core_result_type(self):
         # resultType=core 없이는 초록이 오지 않는다

@@ -9,13 +9,13 @@
 """
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 MISS = object()
 
 
 def _now():
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def get(conn, source, key):
@@ -29,7 +29,7 @@ def get(conn, source, key):
         return MISS
     try:
         return json.loads(row["response"])
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return MISS
 
 

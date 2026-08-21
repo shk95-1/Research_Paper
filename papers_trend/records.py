@@ -18,16 +18,27 @@ import argparse
 import json
 import sys
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 RAW_DIR = HERE / "raw"
 
 FIELDS = (
-    "openalex_id", "doi", "title", "publication_date", "month_bucket",
-    "date_precision", "year", "journal", "keywords", "topics", "concepts",
-    "citation_count", "collected_at", "query_id",
+    "openalex_id",
+    "doi",
+    "title",
+    "publication_date",
+    "month_bucket",
+    "date_precision",
+    "year",
+    "journal",
+    "keywords",
+    "topics",
+    "concepts",
+    "citation_count",
+    "collected_at",
+    "query_id",
 )
 
 
@@ -74,7 +85,7 @@ def bare_doi(value):
     doi = value.strip().lower()
     for prefix in ("https://doi.org/", "http://doi.org/", "doi:"):
         if doi.startswith(prefix):
-            doi = doi[len(prefix):]
+            doi = doi[len(prefix) :]
             break
     return doi or None
 
@@ -110,7 +121,7 @@ def raw_meta(query_id):
     try:
         with open(path, encoding="utf-8") as handle:
             return json.load(handle)
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return {}
 
 
@@ -118,9 +129,7 @@ def iter_raw(query_id):
     """raw/{query_id}/*.jsonl 전체를 openalex_id 기준으로 중복 없이 흘려준다."""
     directory = RAW_DIR / query_id
     if not directory.exists():
-        raise FileNotFoundError(
-            f"{directory} 가 없습니다. 먼저 collect_openalex 를 실행하세요."
-        )
+        raise FileNotFoundError(f"{directory} 가 없습니다. 먼저 collect_openalex 를 실행하세요.")
     seen = set()
     for path in sorted(directory.glob("*.jsonl")):
         with open(path, encoding="utf-8") as handle:
@@ -150,9 +159,7 @@ def summarize(records):
     return {
         "total": len(records),
         "date_precision": dict(precision),
-        "excluded_from_monthly": sum(
-            1 for record in records if not record["month_bucket"]
-        ),
+        "excluded_from_monthly": sum(1 for record in records if not record["month_bucket"]),
         "months": dict(sorted(months.items())),
         "unique_keywords": len({k for r in records for k in r["keywords"]}),
         "unique_topics": len({t for r in records for t in r["topics"]}),
@@ -167,15 +174,18 @@ def main(argv=None):
         description="원본 JSONL 에서 집계용 필드를 추출한다. 순수 변환.",
     )
     parser.add_argument("--profile", required=True)
-    parser.add_argument("--out", default=None,
-                        help="JSONL 출력 경로. '-' 면 stdout. 생략하면 요약만 출력")
+    parser.add_argument(
+        "--out", default=None, help="JSONL 출력 경로. '-' 면 stdout. 생략하면 요약만 출력"
+    )
     args = parser.parse_args(argv)
 
     records = load_records(args.profile)
     summary = summarize(records)
 
     if args.out:
-        stream = sys.stdout if args.out == "-" else open(args.out, "w", encoding="utf-8")
+        # stdout 은 with 블록으로 닫으면 안 되므로 try/finally 로 실제 파일일 때만 닫는다.
+        # context manager 로 바꾸면 동작이 바뀐다.
+        stream = sys.stdout if args.out == "-" else open(args.out, "w", encoding="utf-8")  # noqa: SIM115
         try:
             for record in records:
                 stream.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -188,15 +198,21 @@ def main(argv=None):
     report = sys.stderr if args.out == "-" else sys.stdout
     print(f"[{args.profile}] 레코드 {summary['total']:,}건", file=report)
     print(f"  date_precision: {summary['date_precision']}", file=report)
-    print(f"  월별 집계 제외 (month_bucket 없음): {summary['excluded_from_monthly']:,}건",
-          file=report)
+    print(
+        f"  월별 집계 제외 (month_bucket 없음): {summary['excluded_from_monthly']:,}건", file=report
+    )
     print(f"  DOI 보유: {summary['with_doi']:,}건", file=report)
-    print(f"  고유 keywords {summary['unique_keywords']:,} / "
-          f"topics {summary['unique_topics']:,} / "
-          f"concepts {summary['unique_concepts']:,}", file=report)
-    print(f"  월 범위: {min(summary['months'], default='-')} ~ "
-          f"{max(summary['months'], default='-')} ({len(summary['months'])}개월)",
-          file=report)
+    print(
+        f"  고유 keywords {summary['unique_keywords']:,} / "
+        f"topics {summary['unique_topics']:,} / "
+        f"concepts {summary['unique_concepts']:,}",
+        file=report,
+    )
+    print(
+        f"  월 범위: {min(summary['months'], default='-')} ~ "
+        f"{max(summary['months'], default='-')} ({len(summary['months'])}개월)",
+        file=report,
+    )
     return 0
 
 

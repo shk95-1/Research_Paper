@@ -57,9 +57,7 @@ def build(record, crossref=None, found_in_sources=None):
     sources = list(found_in_sources or [PRIMARY_SOURCE])
     crossref_verified = crossref is not None
     similarity = (
-        title_similarity(record.get("title"), crossref.get("title"))
-        if crossref_verified
-        else 0.0
+        title_similarity(record.get("title"), crossref.get("title")) if crossref_verified else 0.0
     )
     title_match = similarity >= TITLE_MATCH_THRESHOLD
     is_retracted = bool(record.get("is_retracted"))

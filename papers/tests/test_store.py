@@ -70,9 +70,21 @@ class PublicRecordTest(unittest.TestCase):
     def test_emits_exactly_the_spec_schema_keys(self):
         messy = record(is_retracted=False, publisher="Elsevier BV")
         expected = [
-            "abstract", "authors", "citation_count", "collected_at", "doi",
-            "is_open_access", "journal", "keywords", "openalex_id", "title",
-            "tldr", "topics", "url", "verification", "year",
+            "abstract",
+            "authors",
+            "citation_count",
+            "collected_at",
+            "doi",
+            "is_open_access",
+            "journal",
+            "keywords",
+            "openalex_id",
+            "title",
+            "tldr",
+            "topics",
+            "url",
+            "verification",
+            "year",
         ]
         self.assertEqual(sorted(store.public_record(messy)), expected)
 
@@ -115,15 +127,12 @@ class StoreTest(unittest.TestCase):
     def test_flattens_verification_into_queryable_columns(self):
         store.upsert(self.conn, record())
         row = self.conn.execute(
-            "SELECT confidence_score, crossref_verified, has_doi, found_in_sources"
-            " FROM papers"
+            "SELECT confidence_score, crossref_verified, has_doi, found_in_sources FROM papers"
         ).fetchone()
         self.assertEqual(row["confidence_score"], 85)
         self.assertEqual(row["crossref_verified"], 1)
         self.assertEqual(row["has_doi"], 1)
-        self.assertEqual(
-            json.loads(row["found_in_sources"]), ["openalex", "semantic_scholar"]
-        )
+        self.assertEqual(json.loads(row["found_in_sources"]), ["openalex", "semantic_scholar"])
 
     def test_stores_doi_less_record_keyed_by_openalex_id(self):
         store.upsert(
@@ -183,12 +192,18 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(len(found), 1)
 
     def test_search_orders_by_confidence_then_year_descending(self):
-        store.upsert(self.conn, record(doi="10.1/a", year=2020,
-                                      verification=verification(confidence_score=70)))
-        store.upsert(self.conn, record(doi="10.1/b", year=2018,
-                                      verification=verification(confidence_score=90)))
-        store.upsert(self.conn, record(doi="10.1/c", year=2024,
-                                      verification=verification(confidence_score=90)))
+        store.upsert(
+            self.conn,
+            record(doi="10.1/a", year=2020, verification=verification(confidence_score=70)),
+        )
+        store.upsert(
+            self.conn,
+            record(doi="10.1/b", year=2018, verification=verification(confidence_score=90)),
+        )
+        store.upsert(
+            self.conn,
+            record(doi="10.1/c", year=2024, verification=verification(confidence_score=90)),
+        )
         got = store.search(self.conn, "retinol")
         self.assertEqual([r["doi"] for r in got], ["10.1/c", "10.1/b", "10.1/a"])
 

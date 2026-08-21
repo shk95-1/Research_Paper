@@ -106,7 +106,7 @@ def _track_budget(host, response):
         return
     try:
         remaining = int(header)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return
     _budget_remaining[host] = remaining
     if remaining < BUDGET_LOW_THRESHOLD and host not in _budget_warned:
@@ -120,9 +120,9 @@ def retry_delay(response, attempt):
     if header:
         try:
             return min(float(header), MAX_SLEEP)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             pass  # HTTP-date 형식. 지수 백오프로 넘어간다
-    return min(BASE_BACKOFF * (2 ** attempt), MAX_SLEEP)
+    return min(BASE_BACKOFF * (2**attempt), MAX_SLEEP)
 
 
 def get_json(url, params=None, headers=None, timeout=40):
@@ -131,9 +131,7 @@ def get_json(url, params=None, headers=None, timeout=40):
     for attempt in range(MAX_RETRIES):
         _throttle(host)
         try:
-            response = session().get(
-                url, params=params, headers=headers or {}, timeout=timeout
-            )
+            response = session().get(url, params=params, headers=headers or {}, timeout=timeout)
         except requests.RequestException as exc:
             warn(f"{host}: 요청 실패 ({exc})")
             time.sleep(retry_delay(None, attempt))

@@ -32,9 +32,7 @@ class ParseBudgetRemainingTest(unittest.TestCase):
 
 class DetermineStoppedReasonTest(unittest.TestCase):
     def test_is_none_on_normal_completion(self):
-        self.assertIsNone(
-            co.determine_stopped_reason(budget_exhausted=False, hit_max_pages=False)
-        )
+        self.assertIsNone(co.determine_stopped_reason(budget_exhausted=False, hit_max_pages=False))
 
     def test_is_budget_exhausted_when_the_budget_ran_out(self):
         self.assertEqual(
@@ -114,18 +112,22 @@ class GetPageBudgetTest(unittest.TestCase):
         self.assertEqual(len(session.calls), 1)
 
     def test_marks_exhausted_when_a_successful_response_shows_zero_remaining(self):
-        session = FakeSession([
-            FakeResponse(200, {"results": []}, headers={"x-ratelimit-remaining": "0"}),
-        ])
+        session = FakeSession(
+            [
+                FakeResponse(200, {"results": []}, headers={"x-ratelimit-remaining": "0"}),
+            ]
+        )
         payload, budget = co.get_page(session, {}, api_key=None)
         self.assertEqual(payload, {"results": []})
         self.assertTrue(budget["exhausted"])
         self.assertEqual(budget["remaining"], 0)
 
     def test_does_not_mark_exhausted_on_a_normal_low_but_nonzero_remaining(self):
-        session = FakeSession([
-            FakeResponse(200, {"results": []}, headers={"x-ratelimit-remaining": "50"}),
-        ])
+        session = FakeSession(
+            [
+                FakeResponse(200, {"results": []}, headers={"x-ratelimit-remaining": "50"}),
+            ]
+        )
         _, budget = co.get_page(session, {}, api_key=None)
         self.assertFalse(budget["exhausted"])
         self.assertEqual(budget["remaining"], 50)
@@ -142,10 +144,12 @@ class GetPageBudgetTest(unittest.TestCase):
         self.assertNotIn("mailto", session.calls[0]["params"])
 
     def test_still_retries_on_429_with_backoff(self):
-        session = FakeSession([
-            FakeResponse(429, headers={"Retry-After": "5"}),
-            FakeResponse(200, {"results": []}),
-        ])
+        session = FakeSession(
+            [
+                FakeResponse(429, headers={"Retry-After": "5"}),
+                FakeResponse(200, {"results": []}),
+            ]
+        )
         payload, budget = self._get_page(session, {}, api_key=None)
         self.assertEqual(payload, {"results": []})
         self.assertFalse(budget["exhausted"])

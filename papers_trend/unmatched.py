@@ -27,8 +27,15 @@ HERE = Path(__file__).resolve().parent
 OUT_DIR = HERE / "out"
 
 FIELDS = [
-    "rank", "term", "paper_count", "first_seen_month", "last_seen_month",
-    "months_present", "example_title_1", "example_title_2", "example_title_3",
+    "rank",
+    "term",
+    "paper_count",
+    "first_seen_month",
+    "last_seen_month",
+    "months_present",
+    "example_title_1",
+    "example_title_2",
+    "example_title_3",
     "verdict",
 ]
 EXAMPLES_PER_TERM = 3
@@ -38,7 +45,8 @@ TITLE_MAX = 140
 def collect_unmatched(record_list, normalized, field="keywords_norm"):
     """정규화됐지만 사전에 없는 표현을 모은다. 예시 제목을 함께 붙인다."""
     stats = defaultdict(lambda: {"papers": 0, "titles": [], "months": set()})
-    for record, normal in zip(record_list, normalized):
+    # strict=False: 길이가 다를 때 기존처럼 짧은 쪽에 맞춰 자르던 동작을 유지한다.
+    for record, normal in zip(record_list, normalized, strict=False):
         title = (record.get("title") or "").strip()
         month = record.get("month_bucket")
         for item in normal.get(field) or []:
@@ -61,18 +69,20 @@ def to_rows(stats, top=None):
     for rank, (term, entry) in enumerate(ordered, start=1):
         titles = entry["titles"] + [""] * EXAMPLES_PER_TERM
         months = sorted(entry["months"])
-        rows.append({
-            "rank": rank,
-            "term": term,
-            "paper_count": entry["papers"],
-            "first_seen_month": months[0] if months else "",
-            "last_seen_month": months[-1] if months else "",
-            "months_present": len(months),
-            "example_title_1": titles[0],
-            "example_title_2": titles[1],
-            "example_title_3": titles[2],
-            "verdict": "",  # 사람이 채운다: lexicon / stopword / keep
-        })
+        rows.append(
+            {
+                "rank": rank,
+                "term": term,
+                "paper_count": entry["papers"],
+                "first_seen_month": months[0] if months else "",
+                "last_seen_month": months[-1] if months else "",
+                "months_present": len(months),
+                "example_title_1": titles[0],
+                "example_title_2": titles[1],
+                "example_title_3": titles[2],
+                "verdict": "",  # 사람이 채운다: lexicon / stopword / keep
+            }
+        )
     return rows
 
 
@@ -82,10 +92,12 @@ def main(argv=None):
         description="사전 미매칭 표현을 빈도순으로 뽑는다. 사람이 검수해서 사전에 넣는다.",
     )
     parser.add_argument("--profile", required=True)
-    parser.add_argument("--field", default="keywords_norm",
-                        choices=["keywords_norm", "topics_norm", "concepts_norm"])
-    parser.add_argument("--top", type=int, default=200,
-                        help="CSV 에 담을 상한. 0 이면 전부")
+    parser.add_argument(
+        "--field",
+        default="keywords_norm",
+        choices=["keywords_norm", "topics_norm", "concepts_norm"],
+    )
+    parser.add_argument("--top", type=int, default=200, help="CSV 에 담을 상한. 0 이면 전부")
     parser.add_argument("--show", type=int, default=25, help="화면에 출력할 개수")
     parser.add_argument("--out", default=None)
     args = parser.parse_args(argv)
@@ -95,8 +107,10 @@ def main(argv=None):
     stats = collect_unmatched(record_list, normalized, args.field)
     rows = to_rows(stats, args.top or None)
 
-    target = Path(args.out) if args.out else (
-        OUT_DIR / f"unmatched_{args.profile}_{args.field.replace('_norm', '')}.csv"
+    target = (
+        Path(args.out)
+        if args.out
+        else (OUT_DIR / f"unmatched_{args.profile}_{args.field.replace('_norm', '')}.csv")
     )
     target.parent.mkdir(parents=True, exist_ok=True)
     with open(target, "w", encoding="utf-8-sig", newline="") as handle:
@@ -106,15 +120,16 @@ def main(argv=None):
 
     total_terms = len(stats)
     total_hits = sum(entry["papers"] for entry in stats.values())
-    print(f"[{args.profile}] {args.field} 미매칭 표현 {total_terms:,}종, "
-          f"등장 {total_hits:,}회")
+    print(f"[{args.profile}] {args.field} 미매칭 표현 {total_terms:,}종, 등장 {total_hits:,}회")
     print(f"  -> {target} ({len(rows):,}행)")
-    print(f"  verdict 컬럼을 사람이 채운다: lexicon / stopword / keep\n")
+    print("  verdict 컬럼을 사람이 채운다: lexicon / stopword / keep\n")
 
     print(f"=== 상위 {args.show} ===")
-    for row in rows[:args.show]:
-        print(f"  {row['rank']:>3}. {row['paper_count']:>5}편  "
-              f"{row['months_present']:>2}개월  {row['term']}")
+    for row in rows[: args.show]:
+        print(
+            f"  {row['rank']:>3}. {row['paper_count']:>5}편  "
+            f"{row['months_present']:>2}개월  {row['term']}"
+        )
         if row["example_title_1"]:
             print(f"        예: {row['example_title_1'][:88]}")
     return 0

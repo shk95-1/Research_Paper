@@ -12,6 +12,7 @@ def quiet():
     """의도된 경고를 삼킨다. 경고 문구 자체는 test_http 에서 검증한다."""
     return mock.patch.object(http, "warn")
 
+
 OPENALEX_RECORD = {
     "doi": "10.1/a",
     "openalex_id": "https://openalex.org/W1",
@@ -81,7 +82,8 @@ class PipelineTest(unittest.TestCase):
             module = getattr(pipeline, name)
             side_effect = value if isinstance(value, Exception) else None
             manager = mock.patch.object(
-                module, "fetch",
+                module,
+                "fetch",
                 side_effect=side_effect,
                 return_value=None if side_effect else value,
             )
@@ -134,9 +136,7 @@ class PipelineTest(unittest.TestCase):
 
     def test_omits_a_source_that_did_not_find_the_paper(self):
         result = self._enrich(s2=None)
-        self.assertEqual(
-            result["verification"]["found_in_sources"], ["openalex", "europepmc"]
-        )
+        self.assertEqual(result["verification"]["found_in_sources"], ["openalex", "europepmc"])
 
     def test_scores_a_fully_enriched_paper_at_one_hundred(self):
         result = self._enrich()
@@ -159,9 +159,11 @@ class PipelineTest(unittest.TestCase):
 
     def test_skips_doi_only_sources_for_a_doi_less_paper(self):
         record = dict(OPENALEX_RECORD, doi=None)
-        with mock.patch.object(pipeline.crossref, "fetch") as crossref_fetch, \
-             mock.patch.object(pipeline.semantic_scholar, "fetch") as s2_fetch, \
-             mock.patch.object(pipeline.europepmc, "fetch", return_value=EPMC):
+        with (
+            mock.patch.object(pipeline.crossref, "fetch") as crossref_fetch,
+            mock.patch.object(pipeline.semantic_scholar, "fetch") as s2_fetch,
+            mock.patch.object(pipeline.europepmc, "fetch", return_value=EPMC),
+        ):
             result = pipeline.enrich(self.conn, record)
         crossref_fetch.assert_not_called()
         s2_fetch.assert_not_called()
@@ -170,9 +172,11 @@ class PipelineTest(unittest.TestCase):
 
     def test_caches_enrichment_so_a_rerun_makes_no_further_calls(self):
         self._enrich()
-        with mock.patch.object(pipeline.crossref, "fetch") as crossref_fetch, \
-             mock.patch.object(pipeline.semantic_scholar, "fetch") as s2_fetch, \
-             mock.patch.object(pipeline.europepmc, "fetch") as epmc_fetch:
+        with (
+            mock.patch.object(pipeline.crossref, "fetch") as crossref_fetch,
+            mock.patch.object(pipeline.semantic_scholar, "fetch") as s2_fetch,
+            mock.patch.object(pipeline.europepmc, "fetch") as epmc_fetch,
+        ):
             result = pipeline.enrich(self.conn, dict(OPENALEX_RECORD))
         crossref_fetch.assert_not_called()
         s2_fetch.assert_not_called()
@@ -194,10 +198,12 @@ class CollectTest(unittest.TestCase):
             os.unlink(self.path)
 
     def _collect(self, works, **kwargs):
-        with mock.patch.object(pipeline.openalex, "search", return_value=works), \
-             mock.patch.object(pipeline.semantic_scholar, "fetch", return_value=S2), \
-             mock.patch.object(pipeline.europepmc, "fetch", return_value=EPMC), \
-             mock.patch.object(pipeline.crossref, "fetch", return_value=CROSSREF):
+        with (
+            mock.patch.object(pipeline.openalex, "search", return_value=works),
+            mock.patch.object(pipeline.semantic_scholar, "fetch", return_value=S2),
+            mock.patch.object(pipeline.europepmc, "fetch", return_value=EPMC),
+            mock.patch.object(pipeline.crossref, "fetch", return_value=CROSSREF),
+        ):
             return pipeline.collect(self.conn, "cosmetic", 2016, 2026, 10, **kwargs)
 
     def test_stores_every_collected_paper(self):

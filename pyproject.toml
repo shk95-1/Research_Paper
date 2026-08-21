@@ -31,3 +31,11 @@ target-version = "py314"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
+
+# SIM117: 중첩 with(mock.patch 등)를 하나로 합치라는 제안은 테스트 파일의 구조를
+# 바꾸는 자동 수정이라 "테스트 로직 수정 금지" 제약과 충돌한다. 동작 자체는 동일하지만
+# 손으로 재구성하는 것도 같은 이유로 보류하고, 이 파일들에서만 규칙을 끈다.
+[tool.ruff.lint.per-file-ignores]
+"papers/tests/test_cli.py" = ["SIM117"]
+"papers/tests/test_http.py" = ["SIM117"]
+"papers/tests/test_openalex.py" = ["SIM117"]

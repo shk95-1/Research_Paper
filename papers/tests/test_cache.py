@@ -37,9 +37,7 @@ class CacheTest(unittest.TestCase):
         cache.put(self.conn, "crossref", "10.1/a", {"from": "crossref"})
         cache.put(self.conn, "semantic_scholar", "10.1/a", {"from": "s2"})
         self.assertEqual(cache.get(self.conn, "crossref", "10.1/a"), {"from": "crossref"})
-        self.assertEqual(
-            cache.get(self.conn, "semantic_scholar", "10.1/a"), {"from": "s2"}
-        )
+        self.assertEqual(cache.get(self.conn, "semantic_scholar", "10.1/a"), {"from": "s2"})
 
     def test_put_twice_overwrites_and_keeps_one_row(self):
         cache.put(self.conn, "crossref", "10.1/a", {"v": 1})

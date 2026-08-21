@@ -35,7 +35,7 @@ import json
 import os
 import sys
 import time
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import requests
@@ -67,11 +67,13 @@ def load_config(path=CONFIG_PATH):
 
 
 def build_filter(query, window):
-    return ",".join([
-        f"title_and_abstract.search:{query}",
-        f"from_publication_date:{window['from']}",
-        f"to_publication_date:{window['to']}",
-    ])
+    return ",".join(
+        [
+            f"title_and_abstract.search:{query}",
+            f"from_publication_date:{window['from']}",
+            f"to_publication_date:{window['to']}",
+        ]
+    )
 
 
 def make_session(mailto):
@@ -87,9 +89,9 @@ def retry_delay(response, attempt):
     if header:
         try:
             return min(float(header), MAX_SLEEP)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             pass
-    return min(BASE_BACKOFF * (2 ** attempt), MAX_SLEEP)
+    return min(BASE_BACKOFF * (2**attempt), MAX_SLEEP)
 
 
 def parse_budget_remaining(headers):
@@ -101,7 +103,7 @@ def parse_budget_remaining(headers):
         return None
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
 
 
@@ -145,8 +147,10 @@ def get_page(session, params, api_key):
             budget["remaining"] = observed
 
         if response.status_code in BUDGET_STATUS:
-            warn(f"{response.status_code} — 일일 예산 소진 추정 (UTC 자정 초기화). "
-                 "재시도하지 않습니다.")
+            warn(
+                f"{response.status_code} — 일일 예산 소진 추정 (UTC 자정 초기화). "
+                "재시도하지 않습니다."
+            )
             budget["exhausted"] = True
             return None, budget
 
@@ -162,8 +166,7 @@ def get_page(session, params, api_key):
 
         if response.status_code in RETRY_STATUS:
             delay = retry_delay(response, attempt)
-            warn(f"{response.status_code}, {delay:.0f}초 후 재시도 "
-                 f"({attempt + 1}/{MAX_RETRIES})")
+            warn(f"{response.status_code}, {delay:.0f}초 후 재시도 ({attempt + 1}/{MAX_RETRIES})")
             time.sleep(delay)
             continue
         warn(f"예상치 못한 상태 {response.status_code}: {response.text[:200]}")
@@ -173,13 +176,20 @@ def get_page(session, params, api_key):
 
 
 def total_count(session, query, window, api_key):
-    payload, _ = get_page(session, {
-        "filter": build_filter(query, window), "select": "id", "per-page": 1,
-    }, api_key)
+    payload, _ = get_page(
+        session,
+        {
+            "filter": build_filter(query, window),
+            "select": "id",
+            "per-page": 1,
+        },
+        api_key,
+    )
     return ((payload or {}).get("meta") or {}).get("count")
 
 
 # --- 재개 상태 -------------------------------------------------------------
+
 
 def profile_dir(query_id):
     return RAW_DIR / query_id
@@ -196,7 +206,7 @@ def load_state(query_id):
     try:
         with open(path, encoding="utf-8") as handle:
             return json.load(handle)
-    except (OSError, ValueError):
+    except OSError, ValueError:
         warn(f"{query_id}: 상태 파일을 읽을 수 없어 처음부터 시작합니다")
         return {"cursor": "*", "pages": 0, "written": 0}
 
@@ -241,6 +251,7 @@ def write_meta(query_id, meta):
 
 # --- 수집 ------------------------------------------------------------------
 
+
 def read_meta(query_id):
     path = profile_dir(query_id) / "_meta.json"
     if not path.exists():
@@ -248,12 +259,13 @@ def read_meta(query_id):
     try:
         with open(path, encoding="utf-8") as handle:
             return json.load(handle)
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return {}
 
 
-def collect_profile(query_id, query, config, mailto, session=None, verbose=True,
-                    max_pages=None, api_key=None):
+def collect_profile(
+    query_id, query, config, mailto, session=None, verbose=True, max_pages=None, api_key=None
+):
     """전건을 raw/{query_id}/{YYYY-MM-DD}.jsonl 에 무손실 추가한다."""
     session = session or make_session(mailto)
     window = config["window"]
@@ -274,9 +286,11 @@ def collect_profile(query_id, query, config, mailto, session=None, verbose=True,
         warn(f"{query_id}: 건수 조회 실패. 직전 기록의 {expected:,}건을 목표로 이어갑니다")
     already = seen_ids(query_id)
     if verbose:
-        print(f"[{query_id}] 대상 {expected:,}건"
-              + (f" / 상한 {limit:,}" if limit else " (전수)")
-              + (f" / 이미 {len(already):,}건 보유, 이어서 수집" if already else ""))
+        print(
+            f"[{query_id}] 대상 {expected:,}건"
+            + (f" / 상한 {limit:,}" if limit else " (전수)")
+            + (f" / 이미 {len(already):,}건 보유, 이어서 수집" if already else "")
+        )
 
     target = min(expected, limit) if limit else expected
     path = jsonl_path(query_id)
@@ -297,24 +311,34 @@ def collect_profile(query_id, query, config, mailto, session=None, verbose=True,
                 stopped_early = True
                 hit_max_pages = True
                 if verbose:
-                    print(f"  --max-pages {max_pages} 에 도달. 커서를 저장하고 멈춥니다."
-                          " 다시 실행하면 이어집니다.")
+                    print(
+                        f"  --max-pages {max_pages} 에 도달. 커서를 저장하고 멈춥니다."
+                        " 다시 실행하면 이어집니다."
+                    )
                 break
-            payload, budget = get_page(session, {
-                "filter": build_filter(query, window),
-                "per-page": per_page,
-                "cursor": cursor,
-            }, api_key)
+            payload, budget = get_page(
+                session,
+                {
+                    "filter": build_filter(query, window),
+                    "per-page": per_page,
+                    "cursor": cursor,
+                },
+                api_key,
+            )
             if not payload:
                 stopped_early = True
                 if budget["exhausted"]:
                     budget_exhausted = True
                     if verbose:
-                        print("  예산 소진 추정. 커서를 저장하고 멈춥니다."
-                              " UTC 자정 이후 다시 실행하면 이어집니다.")
+                        print(
+                            "  예산 소진 추정. 커서를 저장하고 멈춥니다."
+                            " UTC 자정 이후 다시 실행하면 이어집니다."
+                        )
                 else:
-                    warn(f"{query_id}: 페이지 수집 실패. 커서를 저장하고 멈춥니다."
-                         " 잠시 뒤 다시 실행하면 이어집니다.")
+                    warn(
+                        f"{query_id}: 페이지 수집 실패. 커서를 저장하고 멈춥니다."
+                        " 잠시 뒤 다시 실행하면 이어집니다."
+                    )
                 break
             results = payload.get("results") or []
             if not results:
@@ -342,17 +366,21 @@ def collect_profile(query_id, query, config, mailto, session=None, verbose=True,
             if verbose:
                 elapsed = time.monotonic() - started
                 remaining_note = (
-                    f"  예산잔량 {budget['remaining']:,}"
-                    if budget["remaining"] is not None else ""
+                    f"  예산잔량 {budget['remaining']:,}" if budget["remaining"] is not None else ""
                 )
-                print(f"  {len(already):,}/{target:,}  "
-                      f"({state['pages']}페이지, {elapsed:.0f}초){remaining_note}", flush=True)
+                print(
+                    f"  {len(already):,}/{target:,}  "
+                    f"({state['pages']}페이지, {elapsed:.0f}초){remaining_note}",
+                    flush=True,
+                )
             if budget["exhausted"]:
                 stopped_early = True
                 budget_exhausted = True
                 if verbose:
-                    print("  예산 소진 추정 (잔량 0). 커서를 저장하고 멈춥니다."
-                          " UTC 자정 이후 다시 실행하면 이어집니다.")
+                    print(
+                        "  예산 소진 추정 (잔량 0). 커서를 저장하고 멈춥니다."
+                        " UTC 자정 이후 다시 실행하면 이어집니다."
+                    )
                 break
 
     is_census = not limit and cursor is None and not stopped_early
@@ -368,7 +396,8 @@ def collect_profile(query_id, query, config, mailto, session=None, verbose=True,
         "pages_this_run": pages_this_run,
         "stopped_early": stopped_early,
         "stopped_reason": determine_stopped_reason(
-            budget_exhausted=budget_exhausted, hit_max_pages=hit_max_pages,
+            budget_exhausted=budget_exhausted,
+            hit_max_pages=hit_max_pages,
         ),
         "remaining_estimate": max(0, (expected or 0) - len(already)),
         "per_page": per_page,
@@ -376,18 +405,20 @@ def collect_profile(query_id, query, config, mailto, session=None, verbose=True,
         "is_census": is_census,
         "census_note": (
             "전수. 정렬 순서는 결과에 영향을 주지 않는다."
-            if is_census else
-            "표본. limit 또는 중단으로 전건을 받지 않았으므로 OpenAlex 기본 정렬"
+            if is_census
+            else "표본. limit 또는 중단으로 전건을 받지 않았으므로 OpenAlex 기본 정렬"
             " (relevance_score) 이 어떤 논문이 포함됐는지를 결정한다."
             " 비율 지표를 모집단 비율로 해석하지 말 것."
         ),
-        "collected_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "collected_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "openalex_fields_verified_on": "2026-08-20",
     }
     write_meta(query_id, meta)
     if verbose:
-        print(f"[{query_id}] 완료: 신규 {new_records:,}건, 누적 {len(already):,}건, "
-              f"중복 {duplicates:,}건 -> {path}")
+        print(
+            f"[{query_id}] 완료: 신규 {new_records:,}건, 누적 {len(already):,}건, "
+            f"중복 {duplicates:,}건 -> {path}"
+        )
         if not is_census:
             warn(f"{query_id}: 전수가 아닙니다. {meta['census_note']}")
     return meta
@@ -398,14 +429,17 @@ def main(argv=None):
         prog="python -m papers_trend.collect_openalex",
         description="OpenAlex 전수 수집. 원본 JSONL 만 남기고 가공하지 않는다.",
     )
-    parser.add_argument("--profile", default="all",
-                        help="config.json 의 프로파일 이름, 또는 all")
+    parser.add_argument("--profile", default="all", help="config.json 의 프로파일 이름, 또는 all")
     parser.add_argument("--config", default=str(CONFIG_PATH))
-    parser.add_argument("--dry-run", action="store_true",
-                        help="건수와 예상 요청 수만 출력하고 수집하지 않는다")
-    parser.add_argument("--max-pages", type=int, default=None,
-                        help="이번 실행에서 받을 페이지 상한. 커서가 저장되므로"
-                             " 여러 번 나눠 전수를 채울 수 있다")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="건수와 예상 요청 수만 출력하고 수집하지 않는다"
+    )
+    parser.add_argument(
+        "--max-pages",
+        type=int,
+        default=None,
+        help="이번 실행에서 받을 페이지 상한. 커서가 저장되므로 여러 번 나눠 전수를 채울 수 있다",
+    )
     args = parser.parse_args(argv)
 
     load_dotenv()
@@ -413,15 +447,18 @@ def main(argv=None):
     mailto = os.environ.get(config.get("mailto_env", "OPENALEX_EMAIL"), "").strip()
     api_key = os.environ.get("OPENALEX_API_KEY", "").strip()
     if not api_key:
-        warn("OPENALEX_API_KEY 가 없어 무인증 예산(하루 1,000크레딧)으로 동작합니다. "
-             "목록 호출은 페이지당 10크레딧이므로 하루 약 100페이지가 상한입니다.")
+        warn(
+            "OPENALEX_API_KEY 가 없어 무인증 예산(하루 1,000크레딧)으로 동작합니다. "
+            "목록 호출은 페이지당 10크레딧이므로 하루 약 100페이지가 상한입니다."
+        )
 
     profiles = config["profiles"]
     wanted = list(profiles) if args.profile == "all" else [args.profile]
     unknown = [name for name in wanted if name not in profiles]
     if unknown:
-        parser.error(f"config 에 없는 프로파일: {', '.join(unknown)}. "
-                     f"사용 가능: {', '.join(profiles)}")
+        parser.error(
+            f"config 에 없는 프로파일: {', '.join(unknown)}. 사용 가능: {', '.join(profiles)}"
+        )
 
     session = make_session(mailto)
     per_page = config.get("per_page", 200)
@@ -434,8 +471,15 @@ def main(argv=None):
                 continue
             print(f"[{query_id}] {count:,}건 -> 예상 요청 {count // per_page + 1}회")
             continue
-        collect_profile(query_id, query, config, mailto, session=session,
-                        max_pages=args.max_pages, api_key=api_key)
+        collect_profile(
+            query_id,
+            query,
+            config,
+            mailto,
+            session=session,
+            max_pages=args.max_pages,
+            api_key=api_key,
+        )
     return 0
 
 

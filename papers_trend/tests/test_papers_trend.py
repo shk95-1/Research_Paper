@@ -70,16 +70,12 @@ class LexiconTest(unittest.TestCase):
 
     def test_chemical_formula_and_name_reach_the_same_key(self):
         self.assertEqual(self._resolve("TiO2")["keyword_key"], "TITANIUM_DIOXIDE")
-        self.assertEqual(
-            self._resolve("titanium dioxide")["keyword_key"], "TITANIUM_DIOXIDE"
-        )
+        self.assertEqual(self._resolve("titanium dioxide")["keyword_key"], "TITANIUM_DIOXIDE")
         self.assertEqual(self._resolve("TiO₂")["keyword_key"], "TITANIUM_DIOXIDE")
 
     def test_abbreviation_and_expansion_reach_the_same_key(self):
         for term in ("SOD", "sods", "superoxide dismutase", "Cu/Zn-SOD"):
-            self.assertEqual(
-                self._resolve(term)["keyword_key"], "SUPEROXIDE_DISMUTASE", term
-            )
+            self.assertEqual(self._resolve(term)["keyword_key"], "SUPEROXIDE_DISMUTASE", term)
 
     def test_singular_and_plural_reach_the_same_key(self):
         self.assertEqual(self._resolve("antioxidant")["keyword_key"], "ANTIOXIDANT")
@@ -119,7 +115,9 @@ class LexiconTest(unittest.TestCase):
         # 접지 않으면 paper_count 가 부풀어 prevalence 가 조용히 틀린다
         resolved = normalize.resolve_field(
             ["ZnO", "zinc oxide", "nano-ZnO"],
-            self.alias_map, self.entries, self.stopwords,
+            self.alias_map,
+            self.entries,
+            self.stopwords,
         )
         self.assertEqual([item["keyword_key"] for item in resolved], ["ZINC_OXIDE"])
 
@@ -157,12 +155,24 @@ class CohortPercentileTest(unittest.TestCase):
 class PaperWeightsTest(unittest.TestCase):
     def _records(self):
         return [
-            {"month_bucket": "2024-01", "citation_count": 100,
-             "publication_date": "2024-01-15", "collected_at": "2026-08-20T00:00:00Z"},
-            {"month_bucket": "2024-01", "citation_count": 0,
-             "publication_date": "2024-01-20", "collected_at": "2026-08-20T00:00:00Z"},
-            {"month_bucket": "2026-08", "citation_count": 3,
-             "publication_date": "2026-08-01", "collected_at": "2026-08-20T00:00:00Z"},
+            {
+                "month_bucket": "2024-01",
+                "citation_count": 100,
+                "publication_date": "2024-01-15",
+                "collected_at": "2026-08-20T00:00:00Z",
+            },
+            {
+                "month_bucket": "2024-01",
+                "citation_count": 0,
+                "publication_date": "2024-01-20",
+                "collected_at": "2026-08-20T00:00:00Z",
+            },
+            {
+                "month_bucket": "2026-08",
+                "citation_count": 3,
+                "publication_date": "2026-08-01",
+                "collected_at": "2026-08-20T00:00:00Z",
+            },
         ]
 
     def test_percentiles_are_computed_within_each_month_not_across(self):
@@ -183,11 +193,15 @@ class PaperWeightsTest(unittest.TestCase):
         self.assertNotIn("citation_percentile_in_cohort", source[0])
 
     def test_records_without_a_month_get_no_percentile(self):
-        rows = [{"month_bucket": None, "citation_count": 9,
-                 "publication_date": "2024", "collected_at": "2026-08-20T00:00:00Z"}]
-        self.assertIsNone(
-            weight.assign_paper_weights(rows)[0]["citation_percentile_in_cohort"]
-        )
+        rows = [
+            {
+                "month_bucket": None,
+                "citation_count": 9,
+                "publication_date": "2024",
+                "collected_at": "2026-08-20T00:00:00Z",
+            }
+        ]
+        self.assertIsNone(weight.assign_paper_weights(rows)[0]["citation_percentile_in_cohort"])
 
     def test_citation_per_year_clips_the_age_denominator(self):
         # 갓 나온 논문의 분모가 0 에 가까워 값이 폭발하는 것을 막는다

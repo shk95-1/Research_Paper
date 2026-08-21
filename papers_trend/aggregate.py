@@ -30,14 +30,14 @@ OUT_DIR = HERE / "out"
 CONFIG_PATH = HERE / "config.json"
 
 # --- trend_class 분류 상수. 전부 여기 한 곳에 모은다 ----------------------
-RECENT_MONTHS = 12          # 최근 창
-PRIOR_MONTHS = 24           # 비교 대상 창
-MIN_TOTAL_PAPERS = 10       # 이 아래면 분류하지 않고 unrated
+RECENT_MONTHS = 12  # 최근 창
+PRIOR_MONTHS = 24  # 비교 대상 창
+MIN_TOTAL_PAPERS = 10  # 이 아래면 분류하지 않고 unrated
 NEW_ENTRANT_MIN_RECENT = 5  # prior 0건이면서 recent 가 이만큼 이상이면 신규 진입
-EMERGING_GROWTH = 1.5       # growth_ratio 하한
-DECLINING_GROWTH = 0.67     # growth_ratio 상한
-STEADY_PRESENCE = 0.5       # months_present / 전체 개월. 이상이면 '유지'로 본다
-SPORADIC_PRESENCE = 0.25    # 이 아래면서 성장하면 sporadic (경계)
+EMERGING_GROWTH = 1.5  # growth_ratio 하한
+DECLINING_GROWTH = 0.67  # growth_ratio 상한
+STEADY_PRESENCE = 0.5  # months_present / 전체 개월. 이상이면 '유지'로 본다
+SPORADIC_PRESENCE = 0.25  # 이 아래면서 성장하면 sporadic (경계)
 
 
 def load_config(path=CONFIG_PATH):
@@ -73,7 +73,11 @@ def round_or_none(value, digits=6):
 # --- 산출물 A --------------------------------------------------------------
 
 DENOMINATOR_FIELDS = [
-    "month_bucket", "query_id", "paper_count", "is_low_sample", "is_provisional",
+    "month_bucket",
+    "query_id",
+    "paper_count",
+    "is_low_sample",
+    "is_provisional",
 ]
 
 
@@ -98,10 +102,20 @@ def monthly_denominator(weighted, query_id, config, provisional):
 # --- 산출물 B --------------------------------------------------------------
 
 MONTHLY_FIELDS = [
-    "month_bucket", "query_id", "keyword_key", "canonical_en", "category",
-    "is_in_lexicon", "paper_count", "total_papers", "prevalence",
-    "citation_sum", "citation_median", "weighted_prevalence",
-    "is_low_sample", "is_provisional",
+    "month_bucket",
+    "query_id",
+    "keyword_key",
+    "canonical_en",
+    "category",
+    "is_in_lexicon",
+    "paper_count",
+    "total_papers",
+    "prevalence",
+    "citation_sum",
+    "citation_median",
+    "weighted_prevalence",
+    "is_low_sample",
+    "is_provisional",
 ]
 
 
@@ -127,10 +141,16 @@ def term_monthly(weighted, query_id, config, provisional, field):
         if record.get("month_bucket"):
             totals[record["month_bucket"]] += 1
 
-    buckets = defaultdict(lambda: {
-        "canonical_en": "", "category": "", "is_in_lexicon": False,
-        "papers": 0, "citations": [], "percentiles": [],
-    })
+    buckets = defaultdict(
+        lambda: {
+            "canonical_en": "",
+            "category": "",
+            "is_in_lexicon": False,
+            "papers": 0,
+            "citations": [],
+            "percentiles": [],
+        }
+    )
     for record in weighted:
         month = record.get("month_bucket")
         if not month:
@@ -147,41 +167,52 @@ def term_monthly(weighted, query_id, config, provisional, field):
     rows = []
     for (key, month), bucket in buckets.items():
         total = totals.get(month, 0)
-        rows.append({
-            "month_bucket": month,
-            "query_id": query_id,
-            "keyword_key": key,
-            "canonical_en": bucket["canonical_en"],
-            "category": bucket["category"],
-            "is_in_lexicon": bucket["is_in_lexicon"],
-            "paper_count": bucket["papers"],
-            "total_papers": total,
-            "prevalence": round_or_none(bucket["papers"] / total if total else None),
-            "citation_sum": sum(bucket["citations"]),
-            "citation_median": round_or_none(median(bucket["citations"]), 2),
-            "weighted_prevalence": round_or_none(
-                weight.weighted_prevalence(bucket["percentiles"])
-            ),
-            "is_low_sample": total < threshold,
-            "is_provisional": month in provisional,
-        })
-    rows.sort(key=lambda row: (row["month_bucket"], -row["paper_count"],
-                              row["keyword_key"]))
+        rows.append(
+            {
+                "month_bucket": month,
+                "query_id": query_id,
+                "keyword_key": key,
+                "canonical_en": bucket["canonical_en"],
+                "category": bucket["category"],
+                "is_in_lexicon": bucket["is_in_lexicon"],
+                "paper_count": bucket["papers"],
+                "total_papers": total,
+                "prevalence": round_or_none(bucket["papers"] / total if total else None),
+                "citation_sum": sum(bucket["citations"]),
+                "citation_median": round_or_none(median(bucket["citations"]), 2),
+                "weighted_prevalence": round_or_none(
+                    weight.weighted_prevalence(bucket["percentiles"])
+                ),
+                "is_low_sample": total < threshold,
+                "is_provisional": month in provisional,
+            }
+        )
+    rows.sort(key=lambda row: (row["month_bucket"], -row["paper_count"], row["keyword_key"]))
     return rows
 
 
 # --- 산출물 C --------------------------------------------------------------
 
 METRICS_FIELDS = [
-    "keyword_key", "canonical_en", "category", "is_in_lexicon", "query_id",
-    "first_seen_month", "total_papers", "months_present", "months_observed",
-    "prevalence_recent", "prevalence_prior", "growth_ratio", "is_new_entrant",
-    "weighted_prevalence_recent", "trend_class",
+    "keyword_key",
+    "canonical_en",
+    "category",
+    "is_in_lexicon",
+    "query_id",
+    "first_seen_month",
+    "total_papers",
+    "months_present",
+    "months_observed",
+    "prevalence_recent",
+    "prevalence_prior",
+    "growth_ratio",
+    "is_new_entrant",
+    "weighted_prevalence_recent",
+    "trend_class",
 ]
 
 
-def classify(total_papers, months_present, months_observed, growth_ratio,
-             is_new_entrant):
+def classify(total_papers, months_present, months_observed, growth_ratio, is_new_entrant):
     """임계값 없이 growth_ratio 만 보면 3편->9편도 300% 가 된다.
 
     그래서 total_papers 하한을 못 넘으면 분류하지 않는다.
@@ -215,8 +246,7 @@ def trend_metrics(monthly_rows, query_id, all_months):
     latest = max(all_months)
     recent_window = {month_add(latest, -offset) for offset in range(RECENT_MONTHS)}
     prior_window = {
-        month_add(latest, -offset)
-        for offset in range(RECENT_MONTHS, RECENT_MONTHS + PRIOR_MONTHS)
+        month_add(latest, -offset) for offset in range(RECENT_MONTHS, RECENT_MONTHS + PRIOR_MONTHS)
     }
 
     grouped = defaultdict(list)
@@ -224,8 +254,7 @@ def trend_metrics(monthly_rows, query_id, all_months):
         grouped[row["keyword_key"]].append(row)
 
     observed_recent = sorted(
-        m for m in all_months
-        if m in recent_window and not _is_provisional_month(monthly_rows, m)
+        m for m in all_months if m in recent_window and not _is_provisional_month(monthly_rows, m)
     )
     observed_prior = sorted(m for m in all_months if m in prior_window)
 
@@ -235,12 +264,8 @@ def trend_metrics(monthly_rows, query_id, all_months):
         recent = [by_month[m] for m in observed_recent if m in by_month]
         prior = [by_month[m] for m in observed_prior if m in by_month]
 
-        prevalence_recent = _mean(
-            [r["prevalence"] for r in recent], len(observed_recent)
-        )
-        prevalence_prior = _mean(
-            [r["prevalence"] for r in prior], len(observed_prior)
-        )
+        prevalence_recent = _mean([r["prevalence"] for r in recent], len(observed_recent))
+        prevalence_prior = _mean([r["prevalence"] for r in prior], len(observed_prior))
         recent_papers = sum(r["paper_count"] for r in recent)
         prior_papers = sum(r["paper_count"] for r in prior)
 
@@ -252,27 +277,29 @@ def trend_metrics(monthly_rows, query_id, all_months):
         total_papers = sum(row["paper_count"] for row in entries)
         months_present = len(entries)
         first = entries[0]
-        rows.append({
-            "keyword_key": key,
-            "canonical_en": first["canonical_en"],
-            "category": first["category"],
-            "is_in_lexicon": first["is_in_lexicon"],
-            "query_id": query_id,
-            "first_seen_month": min(by_month),
-            "total_papers": total_papers,
-            "months_present": months_present,
-            "months_observed": len(all_months),
-            "prevalence_recent": round_or_none(prevalence_recent),
-            "prevalence_prior": round_or_none(prevalence_prior),
-            "growth_ratio": round_or_none(growth, 4),
-            "is_new_entrant": is_new,
-            "weighted_prevalence_recent": round_or_none(
-                _mean_present([r["weighted_prevalence"] for r in recent])
-            ),
-            "trend_class": classify(
-                total_papers, months_present, len(all_months), growth, is_new
-            ),
-        })
+        rows.append(
+            {
+                "keyword_key": key,
+                "canonical_en": first["canonical_en"],
+                "category": first["category"],
+                "is_in_lexicon": first["is_in_lexicon"],
+                "query_id": query_id,
+                "first_seen_month": min(by_month),
+                "total_papers": total_papers,
+                "months_present": months_present,
+                "months_observed": len(all_months),
+                "prevalence_recent": round_or_none(prevalence_recent),
+                "prevalence_prior": round_or_none(prevalence_prior),
+                "growth_ratio": round_or_none(growth, 4),
+                "is_new_entrant": is_new,
+                "weighted_prevalence_recent": round_or_none(
+                    _mean_present([r["weighted_prevalence"] for r in recent])
+                ),
+                "trend_class": classify(
+                    total_papers, months_present, len(all_months), growth, is_new
+                ),
+            }
+        )
     rows.sort(key=lambda row: (-row["total_papers"], row["keyword_key"]))
     return rows
 
@@ -283,8 +310,7 @@ _PROVISIONAL_CACHE = {}
 def _is_provisional_month(monthly_rows, month):
     if month not in _PROVISIONAL_CACHE:
         _PROVISIONAL_CACHE[month] = any(
-            row["is_provisional"] for row in monthly_rows
-            if row["month_bucket"] == month
+            row["is_provisional"] for row in monthly_rows if row["month_bucket"] == month
         )
     return _PROVISIONAL_CACHE[month]
 
@@ -303,6 +329,7 @@ def _mean_present(values):
 
 
 # --- 실행 ------------------------------------------------------------------
+
 
 def census_guard(query_id, allow_sample=False):
     """전수가 아닌 데이터로 비율 지표를 내는 것을 막는다.
@@ -325,8 +352,10 @@ def census_guard(query_id, allow_sample=False):
     if not allow_sample:
         raise SystemExit(f"[중단] {message}")
     print(f"[warn] {message}", file=sys.stderr)
-    print("[warn] 아래 CSV 의 prevalence 는 표본 내 비율입니다. "
-          "모집단 비율이 아닙니다.", file=sys.stderr)
+    print(
+        "[warn] 아래 CSV 의 prevalence 는 표본 내 비율입니다. 모집단 비율이 아닙니다.",
+        file=sys.stderr,
+    )
     return meta
 
 
@@ -338,30 +367,26 @@ def run(query_id, config=None, out_dir=OUT_DIR, allow_sample=False):
     weighted = weight.assign_paper_weights(normalized)
 
     collected_at = records.raw_meta(query_id).get("collected_at")
-    provisional = provisional_months(
-        collected_at, config.get("provisional_months", 3)
-    )
+    provisional = provisional_months(collected_at, config.get("provisional_months", 3))
     _PROVISIONAL_CACHE.clear()
 
     denominator = monthly_denominator(weighted, query_id, config, provisional)
     all_months = [row["month_bucket"] for row in denominator]
 
-    keyword_rows = term_monthly(weighted, query_id, config, provisional,
-                                "keywords_norm")
-    topic_rows = term_monthly(weighted, query_id, config, provisional,
-                              "topics_norm")
+    keyword_rows = term_monthly(weighted, query_id, config, provisional, "keywords_norm")
+    topic_rows = term_monthly(weighted, query_id, config, provisional, "topics_norm")
     metric_rows = trend_metrics(keyword_rows, query_id, all_months)
 
     out_dir = Path(out_dir)
     written = {
         "monthly_denominator.csv": write_csv(
-            out_dir / "monthly_denominator.csv", DENOMINATOR_FIELDS, denominator),
+            out_dir / "monthly_denominator.csv", DENOMINATOR_FIELDS, denominator
+        ),
         "keyword_monthly.csv": write_csv(
-            out_dir / "keyword_monthly.csv", MONTHLY_FIELDS, keyword_rows),
-        "topic_monthly.csv": write_csv(
-            out_dir / "topic_monthly.csv", MONTHLY_FIELDS, topic_rows),
-        "trend_metrics.csv": write_csv(
-            out_dir / "trend_metrics.csv", METRICS_FIELDS, metric_rows),
+            out_dir / "keyword_monthly.csv", MONTHLY_FIELDS, keyword_rows
+        ),
+        "topic_monthly.csv": write_csv(out_dir / "topic_monthly.csv", MONTHLY_FIELDS, topic_rows),
+        "trend_metrics.csv": write_csv(out_dir / "trend_metrics.csv", METRICS_FIELDS, metric_rows),
     }
     return {
         "written": written,
@@ -381,15 +406,16 @@ def main(argv=None):
     )
     parser.add_argument("--profile", required=True)
     parser.add_argument("--out", default=str(OUT_DIR))
-    parser.add_argument("--allow-sample", action="store_true",
-                        help="전수가 아닌 데이터로도 집계한다. prevalence 가 표본 내"
-                             " 비율이 된다는 것을 알고 쓸 때만")
+    parser.add_argument(
+        "--allow-sample",
+        action="store_true",
+        help="전수가 아닌 데이터로도 집계한다. prevalence 가 표본 내"
+        " 비율이 된다는 것을 알고 쓸 때만",
+    )
     args = parser.parse_args(argv)
 
-    result = run(args.profile, out_dir=Path(args.out),
-                 allow_sample=args.allow_sample)
-    print(f"[{args.profile}] 레코드 {result['records']:,}건, "
-          f"{result['months']}개월")
+    result = run(args.profile, out_dir=Path(args.out), allow_sample=args.allow_sample)
+    print(f"[{args.profile}] 레코드 {result['records']:,}건, {result['months']}개월")
     for name, count in result["written"].items():
         print(f"  {name:26} {count:>7,}행")
     print(f"  provisional (색인 미완 추정): {', '.join(result['provisional']) or '없음'}")

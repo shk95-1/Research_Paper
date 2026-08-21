@@ -139,9 +139,7 @@ def normalize_record(record, alias_map, entries, stopwords):
     """
     result = dict(record)
     for field in _KEYWORD_FIELDS:
-        result[f"{field}_norm"] = resolve_field(
-            record.get(field), alias_map, entries, stopwords
-        )
+        result[f"{field}_norm"] = resolve_field(record.get(field), alias_map, entries, stopwords)
     return result
 
 
@@ -155,6 +153,7 @@ def normalize_all(record_list, alias_map=None, entries=None, stopwords=None):
 
 def summarize(record_list, normalized):
     """정규화가 실제로 일했는지 보여주는 숫자들."""
+
     def unique(rows, field):
         return {term for row in rows for term in (row.get(field) or [])}
 
@@ -181,9 +180,7 @@ def summarize(record_list, normalized):
 
 
 def top_terms(normalized, field="keywords_norm", limit=20):
-    counter = Counter(
-        item["canonical_en"] for row in normalized for item in (row.get(field) or [])
-    )
+    counter = Counter(item["canonical_en"] for row in normalized for item in (row.get(field) or []))
     return counter.most_common(limit)
 
 
@@ -207,13 +204,14 @@ def main(argv=None):
     normalized = normalize_all(record_list, alias_map, entries, stopwords)
 
     print(f"[{args.profile}] 레코드 {len(record_list):,}건")
-    print(f"  사전 항목 {len(entries)}개, 별칭 {len(alias_map)}개, "
-          f"불용어 {len(stopwords)}개\n")
+    print(f"  사전 항목 {len(entries)}개, 별칭 {len(alias_map)}개, 불용어 {len(stopwords)}개\n")
 
     print("=== 정규화 전/후 고유 표현 수 ===")
     for field, stat in summarize(record_list, normalized).items():
-        print(f"  {field:9} {stat['unique_before']:>6,} -> {stat['unique_after']:>6,}"
-              f"  (감소 {stat['reduction']:,} / 사전 적중 {stat['lexicon_keys_hit']}개)")
+        print(
+            f"  {field:9} {stat['unique_before']:>6,} -> {stat['unique_after']:>6,}"
+            f"  (감소 {stat['reduction']:,} / 사전 적중 {stat['lexicon_keys_hit']}개)"
+        )
 
     print(f"\n=== 불용어·정규화 전 상위 {args.top} (keywords 원본) ===")
     for term, count in top_raw_terms(record_list, "keywords", args.top):

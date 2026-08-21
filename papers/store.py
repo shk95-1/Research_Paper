@@ -21,23 +21,56 @@ DEFAULT_JSON = os.path.join(os.path.dirname(__file__), "out", "papers.json")
 
 # 스펙 8절 레코드 스키마. public_record() 가 내보내는 키의 정의이기도 하다.
 RECORD_FIELDS = (
-    "doi", "openalex_id", "title", "authors", "year", "journal", "abstract",
-    "tldr", "keywords", "topics", "citation_count", "is_open_access", "url",
-    "verification", "collected_at",
+    "doi",
+    "openalex_id",
+    "title",
+    "authors",
+    "year",
+    "journal",
+    "abstract",
+    "tldr",
+    "keywords",
+    "topics",
+    "citation_count",
+    "is_open_access",
+    "url",
+    "verification",
+    "collected_at",
 )
 LIST_FIELDS = ("authors", "keywords", "topics")
 
 VERIFICATION_FIELDS = (
-    "crossref_verified", "title_match", "found_in_sources",
-    "is_retracted", "has_doi", "confidence_score",
+    "crossref_verified",
+    "title_match",
+    "found_in_sources",
+    "is_retracted",
+    "has_doi",
+    "confidence_score",
 )
 
 COLUMNS = (
-    "key", "doi", "openalex_id", "title", "authors", "year", "journal",
-    "abstract", "tldr", "keywords", "topics", "citation_count",
-    "is_open_access", "url", "crossref_verified", "title_match",
-    "found_in_sources", "is_retracted", "has_doi", "confidence_score",
-    "collected_at", "raw",
+    "key",
+    "doi",
+    "openalex_id",
+    "title",
+    "authors",
+    "year",
+    "journal",
+    "abstract",
+    "tldr",
+    "keywords",
+    "topics",
+    "citation_count",
+    "is_open_access",
+    "url",
+    "crossref_verified",
+    "title_match",
+    "found_in_sources",
+    "is_retracted",
+    "has_doi",
+    "confidence_score",
+    "collected_at",
+    "raw",
 )
 
 SCHEMA = """
@@ -150,7 +183,7 @@ def upsert(conn, record):
 def _from_row(row):
     try:
         return json.loads(row["raw"])
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
 
 

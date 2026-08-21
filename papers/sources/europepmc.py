@@ -38,12 +38,15 @@ def fetch(doi=None, title=None):
     query = _query(doi, title)
     if not query:
         return None
-    payload = http.get_json(BASE, params={
-        "query": query,
-        "format": "json",
-        "resultType": "core",
-        "pageSize": 1,
-    })
+    payload = http.get_json(
+        BASE,
+        params={
+            "query": query,
+            "format": "json",
+            "resultType": "core",
+            "pageSize": 1,
+        },
+    )
     hits = ((payload or {}).get("resultList") or {}).get("result") or []
     if not hits or not isinstance(hits[0], dict):
         return None

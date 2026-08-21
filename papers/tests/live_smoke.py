@@ -72,7 +72,7 @@ class LiveSmokeTest(unittest.TestCase):
         result = europepmc.fetch(
             doi=None,
             title="Integrating habits and practices data for soaps, cosmetics and air"
-                  " care products into an existing aggregate exposure model",
+            " care products into an existing aggregate exposure model",
         )
         self.assertIsNotNone(result, "제목 검색이 실패했습니다")
 

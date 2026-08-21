@@ -77,9 +77,7 @@ class BuildTest(unittest.TestCase):
         self.assertFalse(result["crossref_verified"])
 
     def test_openalex_only_without_an_abstract_scores_five(self):
-        result = verify.build(
-            record(abstract=None), crossref=None, found_in_sources=["openalex"]
-        )
+        result = verify.build(record(abstract=None), crossref=None, found_in_sources=["openalex"])
         self.assertEqual(result["confidence_score"], 5)
 
     def test_all_three_sources_plus_crossref_scores_one_hundred(self):
@@ -146,8 +144,14 @@ class BuildTest(unittest.TestCase):
         result = verify.build(record(), crossref=None, found_in_sources=["openalex"])
         self.assertEqual(
             sorted(result),
-            ["confidence_score", "crossref_verified", "found_in_sources",
-             "has_doi", "is_retracted", "title_match"],
+            [
+                "confidence_score",
+                "crossref_verified",
+                "found_in_sources",
+                "has_doi",
+                "is_retracted",
+                "title_match",
+            ],
         )
 
     def test_does_not_mutate_the_source_list_it_was_given(self):
