@@ -120,6 +120,71 @@ class ComputeStepsTest(unittest.TestCase):
         self.assertFalse(any(s["kind"] == "trials_collect" for s in steps))
 
 
+class PubmedCapableProfileSkipTest(unittest.TestCase):
+    """리뷰 Finding3(실행에서 실제로 드러남): pubmed_query 가 없는 프로파일에는
+    pubmed collect/aggregate 단계를 계획에 넣지 않는다 — 존재하지 않는 raw 를
+    집계하려다 설명되지 않는 실패로 이어진다."""
+
+    def test_a_profile_without_pubmed_query_gets_no_pubmed_collect_step(self):
+        steps = monthly_collect.compute_steps(
+            ["sunscreen", "cosmetics"],
+            ["openalex", "pubmed"],
+            "2026-07-31",
+            skip_trials=True,
+            pubmed_capable={"sunscreen"},
+        )
+        collect_argvs = [s["argv"] for s in steps if s["kind"] == "trend_collect"]
+        cosmetics_providers = {
+            argv[argv.index("--provider") + 1] for argv in collect_argvs if "cosmetics" in argv
+        }
+        self.assertEqual(cosmetics_providers, {"openalex"})
+        sunscreen_providers = {
+            argv[argv.index("--provider") + 1] for argv in collect_argvs if "sunscreen" in argv
+        }
+        self.assertEqual(sunscreen_providers, {"openalex", "pubmed"})
+
+    def test_a_profile_without_pubmed_query_gets_no_pubmed_aggregate_step(self):
+        steps = monthly_collect.compute_steps(
+            ["sunscreen", "cosmetics"],
+            ["openalex", "pubmed"],
+            "2026-07-31",
+            skip_trials=True,
+            pubmed_capable={"sunscreen"},
+        )
+        aggregate_argvs = [s["argv"] for s in steps if s["kind"] == "trend_aggregate"]
+        cosmetics_aggregates = [argv for argv in aggregate_argvs if "cosmetics" in argv]
+        self.assertEqual(len(cosmetics_aggregates), 1)  # openalex 만
+        self.assertNotIn("pubmed", cosmetics_aggregates[0])
+        sunscreen_aggregates = [argv for argv in aggregate_argvs if "sunscreen" in argv]
+        self.assertEqual(len(sunscreen_aggregates), 2)  # openalex + pubmed
+
+    def test_a_skipped_profile_gets_exactly_one_summary_note(self):
+        steps = monthly_collect.compute_steps(
+            ["cosmetics"],
+            ["openalex", "pubmed"],
+            "2026-07-31",
+            skip_trials=True,
+            pubmed_capable=set(),
+        )
+        skipped = [s for s in steps if s["kind"] == "skipped"]
+        self.assertEqual(len(skipped), 1)
+        self.assertIn("pubmed_query 없음", skipped[0]["note"])
+
+    def test_pubmed_capable_defaults_to_every_profile_when_omitted(self):
+        # 기존 테스트(위 ComputeStepsTest)가 pubmed_capable 을 안 넘겨도
+        # 그대로 통과해야 한다 — 생략하면 모든 프로파일을 capable 로 본다.
+        steps = monthly_collect.compute_steps(
+            ["sunscreen"], ["openalex", "pubmed"], "2026-07-31", skip_trials=True
+        )
+        self.assertFalse(any(s["kind"] == "skipped" for s in steps))
+        collect_providers = {
+            s["argv"][s["argv"].index("--provider") + 1]
+            for s in steps
+            if s["kind"] == "trend_collect"
+        }
+        self.assertEqual(collect_providers, {"openalex", "pubmed"})
+
+
 class OverallExitCodeTest(unittest.TestCase):
     """각 단계의 exit code 집계 — 순수 함수."""
 
@@ -133,6 +198,12 @@ class OverallExitCodeTest(unittest.TestCase):
 
     def test_none_from_a_dry_run_skip_does_not_count_as_a_failure(self):
         results = [("a", 0), ("b", None)]
+        self.assertEqual(monthly_collect.overall_exit_code(results), 0)
+
+    def test_skipped_from_a_pubmed_incapable_profile_does_not_count_as_a_failure(self):
+        # 리뷰 Finding3: compute_steps() 의 "skipped" 단계(pubmed_query 없음)
+        # 는 부분/실패가 아니라 계획대로 건너뛴 것이다.
+        results = [("a", 0), ("b", "skipped")]
         self.assertEqual(monthly_collect.overall_exit_code(results), 0)
 
     def test_empty_results_is_zero(self):

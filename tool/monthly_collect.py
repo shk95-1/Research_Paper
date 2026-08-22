@@ -78,18 +78,38 @@ def previous_completed_month_end(today):
     return last_day_of_previous_month.isoformat()
 
 
-def compute_steps(profiles, providers, window_to, *, skip_trials):
+def compute_steps(profiles, providers, window_to, *, skip_trials, pubmed_capable=None):
     """실행할 단계 목록을 순서대로 구성한다. (순수 함수 — 아무것도 실행하지 않는다)
 
     각 단계는 {"kind": ..., "argv": [...]} — argv 는 paper_radar.cli.parse_args()
     에 그대로 넘길 수 있는 서브커맨드 인자 목록이다("paper-radar" 자체는
-    포함하지 않는다). 순서: 항목3 브리핑 "동작 순서" 그대로 — collect 전부
-    -> (aggregate, overlap) 프로파일별 -> trials(옵션).
+    포함하지 않는다). "skipped" 종류는 argv 가 없다 — run_plan() 이 이를
+    실행 없이 요약에만 한 줄 남긴다. 순서: 항목3 브리핑 "동작 순서" 그대로
+    — collect 전부 -> (aggregate, overlap) 프로파일별 -> trials(옵션).
+
+    pubmed_capable: config.json 에 pubmed_query 가 있는 프로파일 이름의
+    집합. None 이면(테스트 편의용 기본값) 모든 프로파일을 pubmed-capable
+    로 본다 — 실제 main() 은 항상 config 를 읽어 이 값을 명시적으로 넘긴다
+    (_pubmed_capable_profiles() 참고). 리뷰 Finding3(실행에서 실제로 드러남):
+    이 값을 무시하면 pubmed_query 가 없는 프로파일(예: cosmetics)에도
+    `trend aggregate --provider pubmed` 단계를 계획에 넣어, 존재하지 않는
+    raw 를 집계하려다 실패해 요약 표에 설명되지 않는 실패가 늘어난다 —
+    그 프로파일의 pubmed 관련 단계(collect·aggregate 둘 다)를 계획에서
+    빼고, "건너뜀(pubmed_query 없음)" 한 줄로 대신한다.
     """
+    pubmed_capable = set(profiles) if pubmed_capable is None else set(pubmed_capable)
     steps = []
 
     for profile in profiles:
         for provider in providers:
+            if provider == "pubmed" and profile not in pubmed_capable:
+                # collect 뿐 아니라 그 아래 aggregate(pubmed) 단계도 함께
+                # 건너뛴다(이 profile 은 애초에 pubmed raw 가 생기지 않는다) —
+                # 두 번째 루프에서 pubmed_capable 를 다시 확인해 중복 없이 뺀다.
+                steps.append(
+                    {"kind": "skipped", "note": f"{profile}/pubmed 건너뜀(pubmed_query 없음)"}
+                )
+                continue
             steps.append(
                 {
                     "kind": "trend_collect",
@@ -110,7 +130,7 @@ def compute_steps(profiles, providers, window_to, *, skip_trials):
         steps.append(
             {"kind": "trend_aggregate", "argv": ["trend", "aggregate", "--profile", profile]}
         )
-        if "pubmed" in providers:
+        if "pubmed" in providers and profile in pubmed_capable:
             steps.append(
                 {
                     "kind": "trend_aggregate",
@@ -130,7 +150,8 @@ def compute_steps(profiles, providers, window_to, *, skip_trials):
 
     if not skip_trials:
         for profile in profiles:
-            # _TRIALS_QUERY_IS_THE_PROFILE_NAME 참고 — 프로파일 이름을 그대로 쓴다.
+            # trials collect 쿼리 선택 근거는 모듈 docstring "동작 순서 4" 참고
+            # — 프로파일 이름을 그대로 쓴다.
             steps.append(
                 {"kind": "trials_collect", "argv": ["trials", "collect", "--query", profile]}
             )
@@ -158,12 +179,21 @@ def run_step(argv):
 def run_plan(steps, *, dry_run, db_path=None):
     """계획된 단계를 순서대로 실행(또는 dry-run 출력)한다.
 
-    돌려주는 값: [(표시용 명령줄, exit_code 또는 None), ...]. exit_code 가
-    None 인 항목은 dry-run 이라 실제로 실행하지 않은 단계다(trend_collect
-    가 아닌 단계) — overall_exit_code() 는 이를 실패로 세지 않는다.
+    돌려주는 값: [(표시용 명령줄, exit_code), ...]. exit_code 는 실제 정수
+    exit code 이거나, 실행하지 않은 단계를 나타내는 두 개의 구분된 표식
+    중 하나다 — None(dry-run 이라 아직 없는 데이터를 다루는 단계를 건너뜀)
+    과 "skipped"(compute_steps() 가 애초에 이 창에서는 실행 대상이 아니라고
+    표시한 단계, 예: pubmed_query 없는 프로파일 — 리뷰 Finding3). 요약
+    표에서 서로 다른 사유로 보이도록 값을 구분해 둔다. overall_exit_code()
+    는 둘 다 실패로 세지 않는다.
     """
     results = []
     for step in steps:
+        if step["kind"] == "skipped":
+            print(f"[건너뜀] {step['note']}")
+            results.append((step["note"], "skipped"))
+            continue
+
         argv = list(step["argv"])
         if db_path and step["kind"] in _ACCEPTS_DB_FLAG:
             argv = argv + ["--db", db_path]
@@ -189,11 +219,12 @@ def run_plan(steps, *, dry_run, db_path=None):
 def overall_exit_code(results):
     """results([(명령줄, exit_code), ...])에서 스크립트 전체의 exit code 를 정한다. (순수 함수)
 
-    exit_code 가 None(dry-run 으로 건너뛴 단계)이거나 0 이면 성공으로 본다.
-    하나라도 그 외의 값이면(부분/실패) 전체를 1 로 묶는다 — 어떤 단계가
-    실패했는지는 요약 표에서 사람이 본다.
+    exit_code 가 None(dry-run 으로 건너뛴 단계) 이거나 "skipped"(compute_steps()
+    가 애초에 이 실행 대상이 아니라고 표시한 단계 — 리뷰 Finding3) 이거나
+    0 이면 성공으로 본다. 하나라도 그 외의 값이면(부분/실패) 전체를 1 로
+    묶는다 — 어떤 단계가 실패했는지는 요약 표에서 사람이 본다.
     """
-    return 1 if any(code not in (0, None) for _, code in results) else 0
+    return 1 if any(code not in (0, None, "skipped") for _, code in results) else 0
 
 
 def _print_summary(results):
@@ -201,6 +232,8 @@ def _print_summary(results):
     for display, code in results:
         if code is None:
             status = "dry-run"
+        elif code == "skipped":
+            status = "건너뜀"
         elif code == 0:
             status = "ok"
         else:
@@ -208,10 +241,18 @@ def _print_summary(results):
         print(f"  [{status:>10}] {display}")
 
 
-def _default_profiles():
-    # config.json 에 실제로 있는 프로파일 전부(수동 편집 없이 --profiles 를
-    # 생략해도 config 가 늘어나면 자동으로 따라간다).
-    return list(trend_collect.load_config()["profiles"])
+def _pubmed_capable_profiles(config):
+    """config["profiles"] 중 pubmed_query 가 있는 프로파일 이름의 집합.
+
+    리뷰 Finding3(실행에서 실제로 드러남): pubmed_query 가 없는 프로파일
+    (예: cosmetics)에 `trend collect --provider pubmed`/`trend aggregate
+    --provider pubmed` 를 계획에 넣으면, collect 는 cli.py 가 이미 exit 1
+    로 거부하지만(_run_trend_collect() 의 missing pubmed_query 체크)
+    aggregate 는 그 체크가 없어 존재하지 않는 raw 를 집계하려다 그대로
+    실패한다 — compute_steps() 가 이 집합을 받아 두 단계 모두 계획에서
+    뺀다.
+    """
+    return {name for name, profile in config["profiles"].items() if "pubmed_query" in profile}
 
 
 def build_arg_parser():
@@ -253,10 +294,20 @@ def main(argv=None):
         today = datetime.now(UTC).date()
     window_to = previous_completed_month_end(today)
 
-    profiles = args.profiles.split(",") if args.profiles else _default_profiles()
+    # config 를 한 번만 읽어 기본 프로파일 목록과 pubmed_capable 판정 둘 다에 쓴다
+    # (리뷰 Finding3 — _pubmed_capable_profiles() 참고).
+    config = trend_collect.load_config()
+    profiles = args.profiles.split(",") if args.profiles else list(config["profiles"])
     providers = args.providers.split(",")
+    pubmed_capable = _pubmed_capable_profiles(config)
 
-    steps = compute_steps(profiles, providers, window_to, skip_trials=args.skip_trials)
+    steps = compute_steps(
+        profiles,
+        providers,
+        window_to,
+        skip_trials=args.skip_trials,
+        pubmed_capable=pubmed_capable,
+    )
     print(f"window_to={window_to}  프로파일={profiles}  프로바이더={providers}")
     results = run_plan(steps, dry_run=args.dry_run, db_path=args.db)
     _print_summary(results)
