@@ -92,6 +92,9 @@ class OpenAlex:
         auth_env="OPENALEX_API_KEY",
         auth_kind="param",
         auth_name="api_key",
+        # x-ratelimit-remaining 은 실측(2026-02 개편)대로 "일일" 크레딧 잔량이다
+        # — BudgetTracker 의 저잔량 경고가 의미 있는 소스.
+        budget_is_daily=True,
     )
 
 

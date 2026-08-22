@@ -44,6 +44,16 @@ class SourcePolicy:
     auth_env: str | None = None  # 자격증명을 담은 환경변수 "이름" (값 자체가 아님)
     auth_kind: str | None = None  # "param" | "header" | None
     auth_name: str | None = None  # 파라미터/헤더 이름. 예: "api_key", "x-api-key"
+    # budget_is_daily: x-ratelimit-remaining 류 헤더가 "일일" 예산의 잔량을
+    # 뜻하는지. 리뷰 Finding2(실측)가 밝힌 문제: 이 헤더 이름 자체는 OpenAlex
+    # (일일 크레딧)와 NCBI E-utilities(초당 레이트리밋, 매 요청 사이에 다시
+    # 찬다)가 똑같이 쓴다 — 헤더 이름만으로는 뜻을 구분할 수 없다. 기본값을
+    # False(보수적)로 두어, 이 값을 명시적으로 True 로 선언한 소스(OpenAlex)
+    # 에서만 BudgetTracker 가 저잔량 경고를 낸다 — 선언하지 않은 소스가
+    # 매 요청마다 "남은 예산 2" 같은 오탐 경고를 내 운영자가 경고 자체를
+    # 무시하도록 훈련시키는 것을 막는다. 호스트 이름을 코드에 하드코딩해
+    # 분기하지 않는다(이 저장소가 피해 온 패턴) — 정책이 스스로 선언한다.
+    budget_is_daily: bool = False
 
     def __post_init__(self) -> None:
         if self.min_interval_s < 0:

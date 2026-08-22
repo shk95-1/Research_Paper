@@ -97,6 +97,12 @@ class PubMed:
         auth_env="NCBI_API_KEY",
         auth_kind="param",
         auth_name="api_key",
+        # budget_is_daily 를 선언하지 않는다(기본값 False) — 리뷰 Finding2
+        # 실측(2026-08-22): NCBI E-utilities 도 X-Ratelimit-Remaining 헤더를
+        # 보내지만(X-Ratelimit-Limit: 3, X-Ratelimit-Remaining: 2, 무키
+        # 3req/s 상한 기준), 이 값은 "초당" 레이트리밋 잔량이라 매 요청
+        # 사이에 다시 찬다 — OpenAlex 식 일일 크레딧과 뜻이 다르다. True 로
+        # 잘못 선언하면 매 PubMed 요청마다 "남은 예산 2" 오탐 경고가 난다.
     )
 
 

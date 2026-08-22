@@ -36,12 +36,23 @@ trend/collect.py 와 같은 규약, 다른 페이지네이션 단위
     명확하다 — MeSH 축은 mesh_terms 하나만 쓴다. 원문 XML 을 통째로 보존할
     이유(스키마 불확실성)가 openalex 만큼 강하지 않다.
 
-NCBI 에는 예산(rate-limit credit) 헤더가 없다
-    OpenAlex 의 x-ratelimit-remaining 같은 응답 헤더를 NCBI E-utilities 는
-    보내지 않는다(BudgetTracker.observe() 가 관련 헤더를 못 찾으면 조용히
-    아무것도 안 하므로, transport.budget.remaining(host) 는 항상 None 이다).
-    그래서 trend/collect.py 의 진행 출력에 있는 "예산잔량 N" 문구를 이
-    모듈의 진행 출력에는 넣지 않는다 — 항상 None 만 찍을 문구는 소음이다.
+NCBI 의 x-ratelimit-remaining 은 "일일" 예산이 아니라 "초당" 레이트리밋이다
+    (리뷰 Finding2, 실측 2026-08-22): 이전 판(위 문단)은 "NCBI 는 이 헤더를
+    아예 안 보낸다"고 적었으나 사실과 반대다 — 실측하면 NCBI E-utilities 도
+    `X-Ratelimit-Limit: 3`, `X-Ratelimit-Remaining: 2` (무키 3req/s 상한
+    기준) 를 보낸다. 문제는 헤더 "이름"이 OpenAlex 의 일일 크레딧 헤더와
+    똑같다는 것 — BudgetTracker 는 헤더 이름만으로 파싱하므로 예전에는
+    이 값을 일일 예산으로 오독해 매 PubMed 요청마다 "남은 예산 2 (임계값
+    100 미만)" 오탐 경고를 냈다(cron 로그에 매달 남으면 운영자가 경고를
+    무시하도록 훈련시킨다). 이제는 SourcePolicy.budget_is_daily 를 소스가
+    직접 선언한다 — OpenAlex 는 True, PubMed(sources/pubmed.py 의 policy)
+    는 선언하지 않아 기본값 False. BudgetTracker 는 이 플래그가 True 인
+    호스트에서만 저잔량 경고를 낸다. state 추적(transport.budget.remaining
+    (host))은 이 플래그와 무관하게 계속 갱신되므로, PubMed 경로에서도 더
+    이상 항상 None 이 아니다 — 다만 그 값은 초당 레이트리밋 잔량이라
+    trend/collect.py(OpenAlex)의 "예산잔량 N" 같은 일일 진행률 의미로 읽으면
+    안 된다. 그래서 이 모듈의 진행 출력에는 여전히 그 문구를 넣지 않는다
+    (매 페이지 사이에 다시 차는 값이라 진행률로서 의미가 없다).
     다만 429(RateLimited)는 예산과 무관한 별개 메커니즘이라 여전히
     존재한다 — 재시도/백오프는 transport.http.Transport 가 이미 처리하므로
     이 모듈은 별도 코드 없이 그 혜택을 받는다.
@@ -597,7 +608,9 @@ def collect_profile(
             requests=request_count,
             records=(meta.get("new_this_run", 0) if meta else 0),
             errors=0,
-            # NCBI 는 예산 헤더를 보내지 않는다(모듈 docstring) — 항상 None.
+            # 실측(리뷰 Finding2, 모듈 docstring 참고)으로는 NCBI 도 이 값을
+            # 보낸다 — 다만 초당 레이트리밋 잔량이라 여기 기록해도 일일
+            # 예산처럼 해석하면 안 된다(RunLog 는 그저 관측치를 남길 뿐).
             budget_remaining=transport.budget.remaining(pubmed.PubMed.policy.host),
             stopped_reason=(meta.get("stopped_reason") if meta else None),
         )

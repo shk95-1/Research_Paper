@@ -42,11 +42,24 @@ class BudgetTracker:
         self._state: dict[str, dict[str, int | None]] = {}
         self._warned: set[str] = set()  # 이미 저잔량 경고를 보낸 host
 
-    def observe(self, host: str, headers: Mapping[str, str]) -> None:
+    def observe(
+        self, host: str, headers: Mapping[str, str], *, budget_is_daily: bool = False
+    ) -> None:
         """헤더에서 예산 관련 값을 파싱해 host 상태를 갱신한다.
 
         관련 헤더가 하나도 없으면(예: 예산제가 없는 소스) 조용히 아무것도 하지
         않는다 — 모든 소스가 이 헤더들을 주는 것은 아니다.
+
+        budget_is_daily: 호출자(transport.http.Transport)가 그 요청의
+        SourcePolicy.budget_is_daily 를 그대로 넘긴다. 리뷰 Finding2(실측):
+        x-ratelimit-remaining 류 헤더 "이름"은 OpenAlex(일일 크레딧)와 NCBI
+        E-utilities(초당 레이트리밋, 매 요청 사이에 다시 참)가 똑같이 쓴다 —
+        이름만으로는 뜻을 구분할 수 없다. state 추적(remaining()/snapshot())
+        은 이 값과 무관하게 항상 한다 — 저잔량 "경고"만 일일 예산 호스트로
+        한정한다. 기본값 False(경고 안 냄)가 보수적인 이유: 선언을 깜빡한
+        새 소스가 조용히 오탐 경고를 내는 쪽보다, 조용히 경고를 안 내는
+        쪽이 덜 시끄럽다(안 내는 쪽은 사람이 필요할 때 코드를 보면 되지만,
+        낸 오탐은 매 실행 로그에 반복돼 진짜 경고를 무시하게 만든다).
         """
         lowered = _lower_lookup(headers)
         parsed = {}
@@ -68,7 +81,12 @@ class BudgetTracker:
         state.update(parsed)
 
         remaining = state.get("remaining")
-        if remaining is not None and remaining < WARN_THRESHOLD and host not in self._warned:
+        if (
+            budget_is_daily
+            and remaining is not None
+            and remaining < WARN_THRESHOLD
+            and host not in self._warned
+        ):
             self._warned.add(host)
             warn(f"{host}: 남은 예산 {remaining} (임계값 {WARN_THRESHOLD} 미만)")
 

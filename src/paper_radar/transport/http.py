@@ -240,7 +240,7 @@ class Transport:
                 continue
 
             elapsed_ms = int((self._clock() - start) * 1000)
-            self.budget.observe(host, response.headers)
+            self.budget.observe(host, response.headers, budget_is_daily=policy.budget_is_daily)
             status = response.status_code
             self._notify(fetch, status, attempt, elapsed_ms, None)
 
