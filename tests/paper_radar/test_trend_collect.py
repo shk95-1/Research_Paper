@@ -391,6 +391,46 @@ class CensusCompletionTest(_CollectTestCase):
         self.assertIsNone(state["complete_window"])
 
 
+class LimitRunNeverPersistsCompleteTest(_CollectTestCase):
+    """리뷰 Finding A(재리뷰 재현): holds_target 저장이 is_census 와 같은
+    `not limit` 게이트를 거치지 않으면, limit 실행이 부분 데이터를 완료로
+    디스크에 남긴다 — 그 뒤 limit 없는 실행이 그 낡은 플래그를 물려받아
+    (already_complete) 부분 데이터만 가진 채 is_census: True 를 보고할 수
+    있다.
+    """
+
+    def test_a_limited_run_reports_a_sample_and_does_not_persist_complete(self):
+        # 모집단 10건 중 limit=2 만 받는다. len(already)=2 는 target(=2) 을
+        # 채우지만(holds_target 성립) cursor 는 아직 살아 있다("다음 페이지"
+        # 커서) — 두 조건 다 limit 실행에서는 "전 모집단을 받았다"는 뜻이
+        # 아니다.
+        self.config["limit"] = 2
+        transport = self._transport(
+            [
+                _count(10),
+                _page(
+                    [
+                        {"id": "https://openalex.org/W1"},
+                        {"id": "https://openalex.org/W2"},
+                    ],
+                    next_cursor="cursor-after-page-1",
+                ),
+            ]
+        )
+        _, run_log = self._run_log()
+        meta = collect.collect_profile(
+            "demo", "demo", self.config, transport, run_log, verbose=False
+        )
+        self.assertEqual(meta["collected"], 2)
+        # (a) is_census 는 False 다.
+        self.assertFalse(meta["is_census"])
+        # (b) state 에 complete 가 저장되지 않는다 — 다음(limit 없는) 실행이
+        # already_complete 로 이 부분 데이터를 전수로 오인하면 안 된다.
+        state = collect.load_state("demo")
+        self.assertFalse(state["complete"])
+        self.assertIsNone(state["complete_window"])
+
+
 class RunLogWiringTest(_CollectTestCase):
     def test_records_a_run_run_source_and_fetch_log_rows(self):
         transport = self._transport([_count(1), _page([{"id": "https://openalex.org/W1"}])])

@@ -402,7 +402,15 @@ def _fetch_profile(query_id, query, config, transport, *, provider, verbose, max
     # 이면(직전 기록도 없으면) 이미 함수가 일찍 return 했다(라인 244-246).
     holds_target = len(already) >= target
 
-    if not stopped_early and (cursor is None or holds_target):
+    # 리뷰 Finding A(재리뷰 재현): 아래 저장은 is_census 와 정확히 같은
+    # `not limit` 게이트를 거쳐야 한다. limit 이 있으면 target 은 expected
+    # 가 아니라 min(expected, limit) 이므로, holds_target(또는 cursor is
+    # None)이 성립해도 "전 모집단을 받았다"는 뜻이 아니다 — 예: limit=2 로
+    # 10건짜리 모집단을 돌리면 커서가 아직 살아 있는 채(cursor="다음 페이지
+    # 커서") complete=True 가 디스크에 남을 뻔했고, 그 뒤 limit 없는 실행이
+    # 이 낡은 플래그를 물려받아 2건만 가진 상태에서 is_census: True 를
+    # 보고할 수 있었다. limit 실행은 완료 상태를 아예 디스크에 남기지 않는다.
+    if not limit and not stopped_early and (cursor is None or holds_target):
         # 이번 실행이 커서를 소진했거나(cursor is None), 페이지를 더 받지
         # 않고도 이미 target 이상을 보유한다(holds_target) — 어느 쪽이든
         # 전수로 인정해 저장한다. 다음 재실행이 무변화 no-op(새 논문 0건)
