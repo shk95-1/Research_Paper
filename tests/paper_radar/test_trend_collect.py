@@ -242,6 +242,113 @@ class BudgetAndMaxPagesTest(_CollectTestCase):
         self.assertEqual(source_reason, ("transport_error",))
 
 
+class CensusCompletionTest(_CollectTestCase):
+    """항목1 회귀: cursor=None 완료 상태가 재실행 때 "*" 로 되살아나면서
+    무변화 재실행이 표본으로 뒤집히던 버그. complete/complete_window 로
+    already_complete 를 판정에 더해 고친다(collect.py 의 새 주석 참고).
+    """
+
+    def test_a_no_op_rerun_after_a_completed_census_stays_a_census(self):
+        # 이게 회귀의 핵심: 새 논문이 0건인 재실행이어도 is_census 가 True
+        # 로 유지돼야 한다 — _meta.json 이 표본으로 뒤집히면 aggregate() 의
+        # census 가드가 산출물 생성을 거부한다.
+        transport1 = self._transport([_count(1), _page([{"id": "https://openalex.org/W1"}])])
+        _, run_log = self._run_log()
+        meta1 = collect.collect_profile(
+            "demo", "demo", self.config, transport1, run_log, verbose=False
+        )
+        self.assertTrue(meta1["is_census"])
+        state1 = collect.load_state("demo")
+        self.assertTrue(state1["complete"])
+        self.assertEqual(state1["complete_window"], self.config["window"])
+
+        # 두 번째 실행 — 건수 조회 응답 하나만 준다. 만약 페이지를 다시
+        # 요청하면 FakeSession 이 "예상보다 많이 호출되었습니다" 로 실패한다
+        # (무변화 재실행은 while 루프 자체가 건너뛰어져야 한다).
+        transport2 = self._transport([_count(1)])
+        meta2 = collect.collect_profile(
+            "demo", "demo", self.config, transport2, run_log, verbose=False
+        )
+        self.assertEqual(meta2["new_this_run"], 0)
+        self.assertTrue(meta2["is_census"])
+
+    def test_extending_the_window_after_completion_recollects_and_updates_complete_window(self):
+        transport1 = self._transport([_count(1), _page([{"id": "https://openalex.org/W1"}])])
+        _, run_log = self._run_log()
+        meta1 = collect.collect_profile(
+            "demo", "demo", self.config, transport1, run_log, verbose=False
+        )
+        self.assertTrue(meta1["is_census"])
+
+        self.config["window"] = dict(self.config["window"], to="2027-12-31")
+        transport2 = self._transport(
+            [
+                _count(2),
+                _page(
+                    [
+                        {"id": "https://openalex.org/W1"},  # 이미 있음 — 중복
+                        {"id": "https://openalex.org/W2"},  # 신규
+                    ]
+                ),
+            ]
+        )
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            meta2 = collect.collect_profile(
+                "demo", "demo", self.config, transport2, run_log, verbose=False
+            )
+        self.assertIn("window", stderr.getvalue())
+        self.assertIn("바뀌었습니다", stderr.getvalue())
+        self.assertEqual(meta2["new_this_run"], 1)
+        self.assertTrue(meta2["is_census"])
+        state2 = collect.load_state("demo")
+        self.assertEqual(state2["complete_window"], self.config["window"])
+
+    def test_a_mid_run_interruption_is_still_not_a_census(self):
+        # 기존 동작 불변: 완료 이전이든 이후든, 이번 실행이 예산/transport
+        # 오류로 중단되면 is_census 는 False 다.
+        transport = self._transport([_count(10), FakeResponse(402)])
+        _, run_log = self._run_log()
+        meta = collect.collect_profile(
+            "demo", "demo", self.config, transport, run_log, verbose=False
+        )
+        self.assertFalse(meta["is_census"])
+
+    def test_backfill_growth_after_completion_that_hits_budget_clears_the_stale_complete_flag(
+        self,
+    ):
+        # 같은 window 안에서 OpenAlex 가 소급 색인해 모집단이 늘어난 뒤(항목1
+        # docstring 참고), 재실행이 다시 예산 소진으로 중단되면 이번 실행은
+        # 전수가 아니다 — state["complete"] 도 True 로 남아 있으면 안 된다
+        # (남아 있으면 그다음 재실행이 "이미 완료됨" 으로 잘못 판정한다).
+        transport1 = self._transport([_count(1), _page([{"id": "https://openalex.org/W1"}])])
+        _, run_log = self._run_log()
+        meta1 = collect.collect_profile(
+            "demo", "demo", self.config, transport1, run_log, verbose=False
+        )
+        self.assertTrue(meta1["is_census"])
+
+        transport2 = self._transport([_count(2), FakeResponse(402)])
+        meta2 = collect.collect_profile(
+            "demo", "demo", self.config, transport2, run_log, verbose=False
+        )
+        self.assertFalse(meta2["is_census"])
+        self.assertEqual(meta2["stopped_reason"], "budget_exhausted")
+        state2 = collect.load_state("demo")
+        self.assertFalse(state2["complete"])
+
+    def test_loading_an_old_schema_state_file_defaults_the_new_fields(self):
+        """구 상태 파일(complete/complete_window 도입 이전)을 읽어도 무해하다."""
+        directory = records.new_raw_dir("demo")
+        directory.mkdir(parents=True)
+        with open(directory / "_state.json", "w", encoding="utf-8") as handle:
+            json.dump({"cursor": None, "pages": 1, "written": 1}, handle)
+
+        state = collect.load_state("demo")
+        self.assertFalse(state["complete"])
+        self.assertIsNone(state["complete_window"])
+
+
 class RunLogWiringTest(_CollectTestCase):
     def test_records_a_run_run_source_and_fetch_log_rows(self):
         transport = self._transport([_count(1), _page([{"id": "https://openalex.org/W1"}])])

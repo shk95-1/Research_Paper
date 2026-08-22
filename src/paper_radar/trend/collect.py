@@ -114,16 +114,28 @@ def state_path(query_id, provider=records.DEFAULT_PROVIDER):
     return profile_dir(query_id, provider) / "_state.json"
 
 
+def _initial_state():
+    # complete/complete_window: collect_pubmed.py 의 complete/complete_through_month
+    # 패턴을 커서 기반 OpenAlex 에 맞춘 것(항목1). cursor 하나만으로는 "아직
+    # 시작 안 함"과 "창을 이미 전수 완료함"이 재실행 때 구분되지 않는다.
+    return {"cursor": "*", "pages": 0, "written": 0, "complete": False, "complete_window": None}
+
+
 def load_state(query_id, provider=records.DEFAULT_PROVIDER):
     path = state_path(query_id, provider)
     if not path.exists():
-        return {"cursor": "*", "pages": 0, "written": 0}
+        return _initial_state()
     try:
         with open(path, encoding="utf-8") as handle:
-            return json.load(handle)
+            state = json.load(handle)
     except OSError, ValueError:
         warn(f"{query_id}: 상태 파일을 읽을 수 없어 처음부터 시작합니다")
-        return {"cursor": "*", "pages": 0, "written": 0}
+        return _initial_state()
+    # 구 스키마 하위호환: 이 두 키 도입 이전 상태 파일에는 없다(collect_pubmed.py
+    # 의 complete_through_month setdefault 와 같은 이유).
+    state.setdefault("complete", False)
+    state.setdefault("complete_window", None)
+    return state
 
 
 def save_state(query_id, state, provider=records.DEFAULT_PROVIDER):
@@ -246,6 +258,44 @@ def _fetch_profile(query_id, query, config, transport, *, provider, verbose, max
     path = jsonl_path(query_id, provider)
     path.parent.mkdir(parents=True, exist_ok=True)
 
+    # --- 전수 완료 판정 (항목1: census 재실행 버그) -----------------------------
+    # 이 창을 이미 전수 완료했었는지(같은 window 로) 를 already_complete 에
+    # 담아둔다. 필요한 이유: 커서가 소진돼 저장된 cursor=None 은 몇 줄 아래
+    # (`cursor = state.get("cursor") or "*"`)에서 "*" 로 되살아난다. 새 논문이
+    # 없는 무변화 재실행이면 already(사이드카)가 이미 target 을 채우고 있어
+    # while 루프(`while cursor and len(already) < target`) 자체가 통째로
+    # 건너뛰어지고, cursor 는 "*" 인 채로 남는다 — `cursor is None` 만으로
+    # is_census 를 판정하면 이 경우 표본으로 잘못 기록되고 aggregate() 의
+    # census 가드가 산출물 생성을 거부한다. already_complete 를 판정식에
+    # 더해 바로잡는다.
+    already_complete = bool(state.get("complete")) and state.get("complete_window") == window
+    if state.get("complete") and not already_complete:
+        # window.to 가 늘어난(가장 흔한 운영 행위) 또는 줄어든 경우 — 어느
+        # 쪽이든 OpenAlex 커서는 중간 지점에서 이어 받을 방법이 없다(pubmed
+        # 처럼 "늘어난 달만" 부분 재개가 불가능하다). 처음부터 다시 받되,
+        # 사이드카(_ids.txt)가 이미 받은 id 를 멱등하게 걸러주므로 늘어나는
+        # 것은 API 요청 수뿐이고 데이터는 안전하다.
+        warn(
+            f"{query_id}: window 가 바뀌었습니다"
+            f"({state.get('complete_window')} -> {window}). 전수 완료 표시를 해제하고"
+            " 커서를 처음부터 재개합니다."
+        )
+        state["complete"] = False
+        state["cursor"] = "*"
+        save_state(query_id, state, provider)
+    elif already_complete and len(already) < target:
+        # 같은 window 안에서도 OpenAlex 가 소급 색인해 모집단이 늘어날 수
+        # 있다(target > 이미 받아 둔 already) — 이 경우 아래 while 루프가
+        # 실제로 다시 돈다. 그 루프가 첫 페이지 요청에서 곧바로 예산 소진
+        # 등으로 중단되면 while 루프 안의 save_state() 호출까지 한 번도 못
+        # 가고 끝난다. 여기서 먼저 complete=False 로 저장해 두지 않으면
+        # 디스크의 state["complete"] 가 True 로 낡아 남아, 다음 재실행이
+        # "이미 완료됨"(already_complete)으로 잘못 판정한다. len(already) >=
+        # target(순수 무변화 재실행, 루프가 아예 안 돈다)이면 이 디스크 쓰기
+        # 자체를 건너뛴다 — 매번 새로 쓸 이유가 없다.
+        state["complete"] = False
+        save_state(query_id, state, provider)
+
     new_records = 0
     duplicates = 0
     pages_this_run = 0
@@ -341,7 +391,19 @@ def _fetch_profile(query_id, query, config, transport, *, provider, verbose, max
                     )
                 break
 
-    is_census = not limit and cursor is None and not stopped_early
+    if cursor is None and not stopped_early:
+        # 이번 실행이 커서를 소진해 전수를 새로 완료했다 — 다음 재실행이
+        # 무변화 no-op(새 논문 0건)이어도 표본으로 뒤집히지 않도록 완료
+        # 표시를 남긴다(항목1, already_complete 가 이 값을 읽는다).
+        state["complete"] = True
+        state["complete_window"] = window
+        state["cursor"] = None
+        save_state(query_id, state, provider)
+
+    # already_complete: 이번 실행 전에 이미 이 창을 전수 완료해 뒀다면(무변화
+    # 재실행으로 루프가 통째로 건너뛰어져 cursor 가 "*" 인 채로 남아도) 표본으로
+    # 뒤집지 않는다. cursor is None: 이번 실행이 방금 커서를 소진했다.
+    is_census = not limit and not stopped_early and (cursor is None or already_complete)
     stopped_reason = determine_stopped_reason(
         budget_exhausted=budget_exhausted,
         transport_error=transport_error,
