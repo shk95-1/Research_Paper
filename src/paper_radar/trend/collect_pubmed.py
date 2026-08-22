@@ -26,6 +26,24 @@ trend/collect.py 와 같은 규약, 다른 페이지네이션 단위
     루프와 (월, retstart) 기반 루프를 하나의 함수에 우겨넣으면 둘 다
     읽기 어려워진다.
 
+census 판정은 count 일치가 아니라 페이지네이션 소진이다 (리뷰 Finding B,
+    실측 2026-08-22): 처음에는 trend/collect.py 와 "규약이 같다"는 말 그대로
+    expected_from_api == collected 로 census 를 판정했다. 그런데 실측(sunscreen
+    전수, 중단 없음)에서 정상 완료한 실행조차 collected(2,344) != expected
+    (3,351) 였다 — 원인은 월 단위 esearch 결과가 서로 겹치기 때문이다: 발행일이
+    연도까지만 있는 논문은 (mindate/maxdate 필터가 날짜 단위라) 그 해 12개 월
+    창 전부에 매칭된다. 즉 expected(월별 count 합) == collected(고유 PMID) 는
+    수집이 완벽해도 구조적으로 성립하지 않는다(실측 중복 981/3,351 = 29%).
+    `collected + duplicates == expected` 로 바꾸는 것도 답이 아니었다 — PubMed
+    자체의 count 드리프트(esearch 응답이 그 사이 바뀜)로 35개월 중 21개월만 그
+    등식이 맞았다. 그래서 지금은 OpenAlex 의 커서 소진 판정과 같은 원리로,
+    "이 달의 esearch 페이지네이션을 끝까지 걸었는가"(exhausted)만으로 판정한다
+    — months_meta[month]["exhausted"](_fetch_month() 의 stopped_reason 이
+    None 이었는가) 가 유일한 근거다. expected/collected/duplicates 는 census
+    판정에서 빠졌지만 진단용으로 _meta.json 에 계속 남는다. 구 _meta.json(이
+    필드 도입 이전)은 자가 치유한다 — _all_exhausted()/_claimed_done_months()
+    참고.
+
 원문 XML 무손실 보존 원칙에서의 의도적 이탈
     trend/collect.py(openalex)는 "스키마는 나중에 정한다"는 원칙으로 API
     응답 원문을 그대로 저장한다. 이 모듈은 그러지 않고 parse_efetch_batch()
@@ -207,6 +225,39 @@ def load_state(query_id):
     return state
 
 
+def _claimed_done_months(state, months):
+    """state 가 "이미 끝냈다"고 주장하는 달 목록(months 의 앞부분). (순수 함수)
+
+    리뷰 Finding B(실측): complete=True 만으로 그 주장을 신뢰하지 않는다 —
+    _fetch_profile() 이 이 목록의 달들이 실제로 months_meta 에 exhausted
+    플래그를 갖고 있는지(_all_exhausted()) 별도로 확인한다. complete_through_month
+    가 현재 months 목록에 없으면(window.from 변경 등) 아무것도 주장하지
+    않는 것으로 본다 — 그 경우는 기존 커서 재개 로직이 처음부터 다시
+    시작하는 것과 같은 원칙이다.
+    """
+    if not state.get("complete"):
+        return []
+    completed_through = state.get("complete_through_month")
+    if completed_through not in months:
+        return []
+    return months[: months.index(completed_through) + 1]
+
+
+def _all_exhausted(months_meta, months):
+    """months 전부가 months_meta 에서 exhausted=True 인지. (순수 함수)
+
+    리뷰 Finding B: PubMed 월별 esearch 결과는 서로 겹친다(발행일이 연도
+    까지만 있는 논문은 그 해 12개 월 창 전부에 매칭 — 실측 2026-08-22
+    sunscreen: 중복 29%) — expected(월별 count 합)==collected(고유 PMID)
+    는 수집이 완벽해도 성립하지 않는다. 그래서 census(그리고 "이미 끝냈다"
+    는 재개 판정 둘 다)는 count 일치가 아니라 "이 달의 esearch 페이지네이션을
+    끝까지 걸었는가"(exhausted)로만 본다. 이 플래그가 없는 달(exhausted
+    키 자체가 없는 구 _meta.json)은 False 로 본다 — 완료로 인정하지 않고
+    다시 걷게 하는 자가 치유의 근거다.
+    """
+    return bool(months) and all(months_meta.get(m, {}).get("exhausted") for m in months)
+
+
 def save_state(query_id, state):
     profile_dir(query_id).mkdir(parents=True, exist_ok=True)
     with open(state_path(query_id), "w", encoding="utf-8") as handle:
@@ -381,8 +432,33 @@ def _fetch_profile(query_id, query, config, transport, *, verbose, max_months):
     path = jsonl_path(query_id)
     path.parent.mkdir(parents=True, exist_ok=True)
 
+    # 리뷰 Finding B(실측): state["complete"]=True 라는 주장을 그 자체로
+    # 신뢰하지 않는다 — 그 근거(주장하는 달들이 실제로 exhausted 인지)를
+    # previous_months(이번 실행이 손대기 전의 _meta.json)로 확인한다. 구
+    # _meta.json(exhausted 필드 도입 이전)이거나 그 필드가 불완전하면
+    # 이 확인이 False 가 되어 아래에서 자가 치유(처음부터 재수집)로 빠진다.
+    claimed_done = _claimed_done_months(state, months)
+    previously_exhausted = _all_exhausted(previous_months, claimed_done)
+
     cursor = state.get("month_cursor")
-    if state.get("complete"):
+    if state.get("complete") and not previously_exhausted:
+        # 자가 치유: complete=True 인데 그 근거(월별 exhausted 기록)가 없다
+        # — 구 스키마로 수집된 raw 가 정확히 이 상태다(이 필드 도입 전에는
+        # count 일치로만 census 를 판정했으므로 exhausted 를 아예 기록하지
+        # 않았다). 완료로 인정하지 않고 처음부터 다시 걷는다 — 사이드카
+        # (_ids.txt) 가 이미 받은 PMID 를 걸러주므로(멱등) 데이터가 두 번
+        # 쌓이지 않는다, 늘어나는 것은 esearch/efetch 요청 수뿐이다.
+        warn(
+            f"{query_id}: 월별 소진(exhausted) 기록이 없는 완료 상태입니다."
+            " 전 구간 완료 표시를 해제하고 처음부터 다시 걷습니다(자가 치유)."
+        )
+        state["complete"] = False
+        state["month_cursor"] = None
+        state["retstart"] = 0
+        save_state(query_id, state)
+        cursor = None
+        start_index = 0
+    elif state.get("complete"):
         completed_through = state.get("complete_through_month")
         if months and completed_through == months[-1]:
             # 같은 창을 이미 끝냈다 — 아무 달도 다시 처리하지 않는다(load_state()
@@ -448,6 +524,11 @@ def _fetch_profile(query_id, query, config, transport, *, verbose, max_months):
                 "expected": expected if expected is not None else prior.get("expected"),
                 "collected": prior.get("collected", 0) + collected,
                 "duplicates": prior.get("duplicates", 0) + duplicates,
+                # exhausted: 리뷰 Finding B — 이번 실행이 이 달의 esearch
+                # 페이지네이션을 끝까지 걸었다(reason is None, _fetch_month()
+                # docstring 참고). is_census 판정의 유일한 근거다 — count
+                # (expected/collected) 일치가 아니다(_all_exhausted() 참고).
+                "exhausted": reason is None,
             }
             new_records += collected
             months_this_run += 1
@@ -484,29 +565,24 @@ def _fetch_profile(query_id, query, config, transport, *, verbose, max_months):
                 state["complete_through_month"] = month
             save_state(query_id, state)
 
-    all_months_done = state.get("complete", False)
-    all_expected_known = len(months_meta) == len(months) and all(
-        m.get("expected") is not None for m in months_meta.values()
-    )
     expected_total = sum(m.get("expected") or 0 for m in months_meta.values())
     collected_total = sum(m.get("collected", 0) for m in months_meta.values())
     duplicates_total = sum(m.get("duplicates", 0) for m in months_meta.values())
-    # census 판정은 expected_total == collected_total 로만 본다 —
-    # duplicates_total 을 더하지 않는다(리뷰 대응, Finding 1 수정의 파생
-    # 버그). months_meta[month]["collected"] 는 이미 실행을 거듭할 때마다
-    # `prior.get("collected") + 이번 실행의 신규 건수`로 누적되므로, 그
-    # 자체가 "이 달에 실제로 저장된 고유 PMID 총수"다. 반면
-    # months_meta[month]["duplicates"] 는 "이번 esearch 페이지 재시도에서
-    # 이미 알고 있던(already) PMID 로 다시 걸린 횟수"인데, retstart 를
-    # 전진시키지 않는 재시도 설계(Finding 1) 상 같은 페이지를 여러 번
-    # 재시도하면 그때마다 이미 collected_total 에 반영된 바로 그 PMID 들이
-    # "새로운 duplicates" 로 또 잡혀 누적된다 — collected_total 과
-    # duplicates_total 을 더하면 같은 PMID 를 이중으로 센다. duplicates_total
-    # 은 그래서 census 등식에서 빼고, 진단용 참고값(meta 의
-    # duplicates_skipped)으로만 남긴다.
-    is_census = all_months_done and all_expected_known and not stopped_early and (
-        expected_total == collected_total
-    )
+    # 리뷰 Finding B(실측 2026-08-22, sunscreen/pubmed 전수 재현): census 판정을
+    # count 일치(expected_total == collected_total)로 했던 이전 판은 구조적으로
+    # 성립 불가였다 — 월 단위 esearch 결과가 서로 겹친다(발행일이 연도까지만
+    # 있는 논문은 그 해 12개 월 창 전부에 매칭). 정상 완료(중단 없음)한 실행도
+    # collected(2,344) != expected(3,351) 였다(중복 981건, 29%).
+    # `collected + duplicates == expected` 로 바꾸는 것도 답이 아니다 — PubMed
+    # 자체의 count 드리프트로(esearch 응답이 그 사이 바뀔 수 있다) 35개월 중
+    # 21개월만 그 등식이 맞았다(예: 2023-10 은 expected 99, collected 90,
+    # duplicates 8 -> 98, 등식이 어긋난다). 그래서 census 는 count 를 전혀 보지
+    # 않고 "이 달의 esearch 페이지네이션을 끝까지 걸었는가"(exhausted, OpenAlex
+    # 커서 소진과 같은 원리)로만 판정한다 — _all_exhausted() 참고.
+    # expected_total/collected_total/duplicates_total 은 census 판정에서 빠졌지만
+    # 진단용으로는 계속 meta 에 남긴다(지우지 않는다).
+    all_months_exhausted = _all_exhausted(months_meta, months)
+    is_census = all_months_exhausted and not stopped_early
     stopped_reason = determine_stopped_reason(
         budget_exhausted=budget_exhausted,
         transport_error=transport_error,
@@ -532,11 +608,20 @@ def _fetch_profile(query_id, query, config, transport, *, verbose, max_months):
         "stopped_reason": stopped_reason,
         "is_census": is_census,
         "census_note": (
-            "전수. window 안의 모든 달을 완료했고, 각 달의 esearch count 합이"
-            " 실제 저장된 고유 PMID 수 합과 일치한다."
+            "전수. window 안의 모든 달의 esearch 페이지네이션을 끝까지 걸었다"
+            " (months[*].exhausted 전부 True). expected_from_api != collected 는"
+            " 비정상이 아니다 — 발행일이 연도까지만 있는 논문은 그 해 12개 월"
+            " 창 전부에 매칭되어 월별 esearch 결과가 서로 겹친다"
+            " (실측 2026-08-22 sunscreen: 중복 981/3,351 = 29%)."
+            " duplicates_skipped 가 그 중복 매칭 횟수다. prevalence 는 collected"
+            " 기준(고유 PMID)으로 해석할 것 — expected_from_api 를 모집단 크기로"
+            " 쓰지 말 것."
             if is_census
-            else "표본 또는 미완. window 의 일부 달만 수집됐거나 중단됐다면"
-            " 아직 전수가 아니다. prevalence 를 모집단 비율로 해석하지 말 것."
+            else "표본 또는 미완. window 의 일부 달이 아직 esearch 페이지네이션을"
+            " 끝까지 걷지 못했다(months[*].exhausted 에 False 가 있다) — 중단됐거나"
+            " (구 스키마에서 넘어온 경우) 자가 치유로 재수집 중이다."
+            " expected_from_api/collected/duplicates_skipped 의 불일치 자체는"
+            " (is_census 와 무관하게) 정상이다 — 위 참고."
         ),
         "collected_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         # 리뷰 대응(minor): 이 태스크(T15)는 월별 esearch(mindate/maxdate/

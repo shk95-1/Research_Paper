@@ -337,6 +337,131 @@ class WindowExtensionAfterCompletionTest(_CollectPubmedTestCase):
         self.assertIn("늘어났습니다", stderr.getvalue())
 
 
+class CensusIsExhaustionBasedTest(_CollectPubmedTestCase):
+    """리뷰 Finding B(실측 2026-08-22, sunscreen/pubmed 전수 재현): 월별
+    esearch 결과가 서로 겹친다(발행일이 연도까지만 있는 논문은 그 해 12개
+    월 창 전부에 매칭) — expected(월별 count 합)==collected(고유 PMID) 는
+    수집이 완벽해도 성립하지 않는다(실측 중복 29%). census 는 count 일치가
+    아니라 "이 달의 esearch 페이지네이션을 끝까지 걸었는가"(exhausted)로만
+    판정해야 한다.
+    """
+
+    def test_heavy_duplicate_overlap_still_counts_as_a_census_when_every_month_is_exhausted(self):
+        # 브리핑 예시 그대로 재현: 한 달이 expected=100, collected=60,
+        # duplicates=40 이어도(1월에서 이미 본 PMID 1~40 이 2월 esearch 결과에
+        # 다시 걸린다 — 연도만 있는 논문 시나리오) 두 달 다 페이지네이션을
+        # 끝까지 걸었으면(한 페이지 안에서, 500 미만) census 다.
+        self.config["window"] = {"from": "2024-01-01", "to": "2024-02-29"}
+        month1_pmids = [str(n) for n in range(1, 61)]  # 60건, 전부 신규
+        month2_new = [str(n) for n in range(101, 161)]  # 60건 신규
+        month2_dupes = [str(n) for n in range(1, 41)]  # 1월과 겹치는 40건
+        month2_pmids = month2_dupes + month2_new  # esearch idlist 100건
+        transport, session = self._transport(
+            [
+                _esearch(month1_pmids, 60),
+                _efetch(month1_pmids),
+                _esearch(month2_pmids, 100),
+                _efetch(month2_new),  # already 에 걸린 40건은 efetch 대상에서 빠진다
+            ]
+        )
+        _, run_log = self._run_log()
+        meta = collect_pubmed.collect_profile(
+            "demo", "demo", self.config, transport, run_log, verbose=False
+        )
+
+        self.assertEqual(meta["expected_from_api"], 160)  # 60 + 100 (진단용, census 판정엔 안 씀)
+        self.assertEqual(meta["collected"], 120)  # 60 + 60 (고유 PMID)
+        self.assertEqual(meta["duplicates_skipped"], 40)
+        # count 는 애초에 안 맞는다(월 사이 PMID 중복 — 브리핑 근거 참고).
+        self.assertNotEqual(meta["expected_from_api"], meta["collected"])
+        self.assertTrue(meta["months"]["2024-01"]["exhausted"])
+        self.assertTrue(meta["months"]["2024-02"]["exhausted"])
+        self.assertTrue(meta["is_census"])
+
+    def test_one_unexhausted_month_makes_the_whole_run_not_a_census(self):
+        # 1월은 끝까지 걷지만(exhausted=True) 2월은 예산 소진으로 중단된다
+        # (exhausted=False) — 1월 하나만으로는 census 가 아니다.
+        self.config["window"] = {"from": "2024-01-01", "to": "2024-02-29"}
+        transport, session = self._transport(
+            [_esearch(["1"], 1), _efetch(["1"]), FakeResponse(402)]
+        )
+        _, run_log = self._run_log()
+        meta = collect_pubmed.collect_profile(
+            "demo", "demo", self.config, transport, run_log, verbose=False
+        )
+
+        self.assertTrue(meta["months"]["2024-01"]["exhausted"])
+        self.assertFalse(meta["months"]["2024-02"]["exhausted"])
+        self.assertFalse(meta["is_census"])
+        self.assertEqual(meta["stopped_reason"], "budget_exhausted")
+
+    def test_an_old_schema_meta_without_exhausted_flags_is_not_trusted_and_gets_rewalked(self):
+        # 리뷰 Finding B 의 핵심 회귀: 이 필드 도입 이전에 count 일치만으로
+        # complete=True/_meta.json 을 써 둔 raw(지금 디스크의 sunscreen/pubmed
+        # 가 정확히 이 상태)를 흉내낸다 — months 값에 "exhausted" 키가 아예
+        # 없다. 이 상태로 재실행하면 완료로 신뢰하지 않고 처음부터 다시
+        # 걸어야 한다(esearch 가 다시 불려야 한다 — 안 불리면 FakeSession 이
+        # 응답 부족으로 실패한다).
+        collect_pubmed.profile_dir("demo").mkdir(parents=True)
+        collect_pubmed.save_state(
+            "demo",
+            {
+                "month_cursor": None,
+                "retstart": 0,
+                "complete": True,
+                "complete_through_month": "2024-01",
+            },
+        )
+        collect_pubmed.write_meta(
+            "demo",
+            {
+                "months": {
+                    "2024-01": {"expected": 1, "collected": 1, "duplicates": 0}
+                },  # exhausted 키 없음(구 스키마)
+                "expected_from_api": 1,
+                "collected": 1,
+            },
+        )
+        collect_pubmed._write_ids("demo", {"1"})  # 사이드카에도 이미 실려 있다
+
+        # esearch 는 다시 불려야 한다(자가 치유) — pmid "1" 은 사이드카에 이미
+        # 있으므로 duplicates 로 걸러져 efetch 는 다시 나가지 않는다(멱등).
+        transport, session = self._transport([_esearch(["1"], 1)])
+        stderr = io.StringIO()
+        _, run_log = self._run_log()
+        with contextlib.redirect_stderr(stderr):
+            meta = collect_pubmed.collect_profile(
+                "demo", "demo", self.config, transport, run_log, verbose=False
+            )
+
+        self.assertEqual(len(session.calls), 1)  # esearch 만 다시 불렸다(efetch 없음 — 전부 중복)
+        self.assertIn("자가 치유", stderr.getvalue())
+        self.assertTrue(meta["months"]["2024-01"]["exhausted"])
+        self.assertTrue(meta["is_census"])
+        # 사이드카 덕에 이미 있던 PMID 1 은 jsonl 에 중복으로 다시 쓰이지 않는다.
+        self.assertEqual(meta["new_this_run"], 0)
+        lines = self._jsonl_lines()
+        self.assertEqual(lines, [])
+
+    def test_a_rerun_after_the_fix_has_populated_exhausted_flags_does_not_rewalk(self):
+        # 자가 치유는 일회성이다 — exhausted 플래그가 채워진 뒤에는(이 수정
+        # 이후 정상 완료한 실행) 다음 재실행이 다시 esearch 하지 않는다.
+        transport1, _ = self._transport([_esearch(["1"], 1), _efetch(["1"])])
+        _, run_log = self._run_log()
+        meta1 = collect_pubmed.collect_profile(
+            "demo", "demo", self.config, transport1, run_log, verbose=False
+        )
+        self.assertTrue(meta1["is_census"])
+        self.assertTrue(meta1["months"]["2024-01"]["exhausted"])
+
+        transport2, session2 = self._transport([])  # 응답을 하나도 주지 않는다
+        meta2 = collect_pubmed.collect_profile(
+            "demo", "demo", self.config, transport2, run_log, verbose=False
+        )
+        self.assertEqual(session2.calls, [])
+        self.assertTrue(meta2["is_census"])
+
+
 class SidecarDedupTest(_CollectPubmedTestCase):
     def test_a_pmid_already_in_the_sidecar_is_not_written_again(self):
         collect_pubmed.profile_dir("demo").mkdir(parents=True)
