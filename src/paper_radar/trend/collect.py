@@ -391,19 +391,36 @@ def _fetch_profile(query_id, query, config, transport, *, provider, verbose, max
                     )
                 break
 
-    if cursor is None and not stopped_early:
-        # 이번 실행이 커서를 소진해 전수를 새로 완료했다 — 다음 재실행이
-        # 무변화 no-op(새 논문 0건)이어도 표본으로 뒤집히지 않도록 완료
-        # 표시를 남긴다(항목1, already_complete 가 이 값을 읽는다).
+    # holds_target: 리뷰 Finding1(라이브 재현) 대응 — 완료 판정을 "이번 실행이
+    # 커서를 소진했다"(cursor is None) 로만 보면, window.to 를 줄였을 때 이미
+    # 사이드카에 쌓아 둔 already 가 새(더 작은) target 을 이미 넘어서서 while
+    # 루프(`len(already) < target`) 자체가 통째로 건너뛰어지고 cursor 는
+    # 초기화된 "*" 인 채로 영원히 남는다 — 그 창-변경 분기가 이미 complete
+    # 를 False 로 리셋해 둔 뒤라 already_complete 로도 되돌릴 경로가 없다.
+    # "이미 target 이상을 보유"도 완료로 인정해 이 영구 표본 고착을 막는다.
+    # expected(그래서 target)가 None 일 일은 없다 — 위에서 expected 가 None
+    # 이면(직전 기록도 없으면) 이미 함수가 일찍 return 했다(라인 244-246).
+    holds_target = len(already) >= target
+
+    if not stopped_early and (cursor is None or holds_target):
+        # 이번 실행이 커서를 소진했거나(cursor is None), 페이지를 더 받지
+        # 않고도 이미 target 이상을 보유한다(holds_target) — 어느 쪽이든
+        # 전수로 인정해 저장한다. 다음 재실행이 무변화 no-op(새 논문 0건)
+        # 이어도 표본으로 뒤집히지 않도록(already_complete 가 이 값을 읽는다).
         state["complete"] = True
         state["complete_window"] = window
-        state["cursor"] = None
+        if cursor is None:
+            state["cursor"] = None
         save_state(query_id, state, provider)
 
     # already_complete: 이번 실행 전에 이미 이 창을 전수 완료해 뒀다면(무변화
     # 재실행으로 루프가 통째로 건너뛰어져 cursor 가 "*" 인 채로 남아도) 표본으로
     # 뒤집지 않는다. cursor is None: 이번 실행이 방금 커서를 소진했다.
-    is_census = not limit and not stopped_early and (cursor is None or already_complete)
+    # holds_target: 커서 소진 없이도(창을 줄인 경우 포함) 이미 target 이상을
+    # 보유한다.
+    is_census = not limit and not stopped_early and (
+        cursor is None or already_complete or holds_target
+    )
     stopped_reason = determine_stopped_reason(
         budget_exhausted=budget_exhausted,
         transport_error=transport_error,

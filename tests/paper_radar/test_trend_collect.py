@@ -272,6 +272,48 @@ class CensusCompletionTest(_CollectTestCase):
         self.assertEqual(meta2["new_this_run"], 0)
         self.assertTrue(meta2["is_census"])
 
+    def test_shrinking_the_window_after_completion_still_recognizes_a_census(self):
+        # 리뷰 Finding1(라이브 재현) 회귀: 창을 줄이면 이미 사이드카에 쌓인
+        # already 가 새(더 작은) target 을 이미 넘어서서 while 루프 자체가
+        # 통째로 건너뛰어진다 — cursor 가 "*" 인 채로 영원히 남아
+        # `cursor is None` 판정만으로는 표본으로 영구 고착됐다(holds_target
+        # 이 이 경로를 완료로 인정해 고친다).
+        transport1 = self._transport(
+            [
+                _count(2),
+                _page(
+                    [
+                        {"id": "https://openalex.org/W1"},
+                        {"id": "https://openalex.org/W2"},
+                    ]
+                ),
+            ]
+        )
+        _, run_log = self._run_log()
+        meta1 = collect.collect_profile(
+            "demo", "demo", self.config, transport1, run_log, verbose=False
+        )
+        self.assertTrue(meta1["is_census"])
+
+        # 창을 좁힌다 — 새 target(1)이 이미 보유한 already(2)보다 작다.
+        self.config["window"] = dict(self.config["window"], to="2023-06-30")
+        transport2 = self._transport([_count(1)])
+        meta2 = collect.collect_profile(
+            "demo", "demo", self.config, transport2, run_log, verbose=False
+        )
+        self.assertTrue(meta2["is_census"])
+        state2 = collect.load_state("demo")
+        self.assertTrue(state2["complete"])
+        self.assertEqual(state2["complete_window"], self.config["window"])
+
+        # 한 번 더 재실행해도 True 를 유지한다(무변화 no-op — 건수 조회 응답
+        # 하나만 준다. 페이지를 다시 요청하면 FakeSession 이 실패한다).
+        transport3 = self._transport([_count(1)])
+        meta3 = collect.collect_profile(
+            "demo", "demo", self.config, transport3, run_log, verbose=False
+        )
+        self.assertTrue(meta3["is_census"])
+
     def test_extending_the_window_after_completion_recollects_and_updates_complete_window(self):
         transport1 = self._transport([_count(1), _page([{"id": "https://openalex.org/W1"}])])
         _, run_log = self._run_log()
