@@ -168,6 +168,20 @@ def parse_args(argv):
         help="이번 실행에서 처리할 달 상한 (--provider pubmed). 월 커서가 저장되므로"
         " 여러 번 나눠 전수를 채울 수 있다",
     )
+    # --window-to: 항목2(주기 수집 브리핑) — 창이 config.json 에만 있으면
+    # 매달 자동화가 그 파일을 sed 로 고쳐야 한다(위험하다). 이 값은 이번
+    # 실행에 한해 config["window"]["to"] 를 덮을 뿐 config.json 은 쓰지
+    # 않는다(tool/monthly_collect.py 가 매달 이 값을 계산해 넘긴다).
+    # --window-from 은 일부러 안 만든다 — 시작점을 옮기면 모집단 자체가
+    # 바뀌어 과거에 이미 낸 CSV 와의 조인이 깨진다. to 만 전진시키는 것이
+    # 이 프로젝트의 재현성 원칙(과거 산출물 불변)에 맞는다.
+    t_collect.add_argument(
+        "--window-to",
+        dest="window_to",
+        default=None,
+        help="이번 실행에 한해 window.to 를 덮는다 (YYYY-MM-DD, config.json 은 쓰지"
+        " 않는다). --window-from 은 없다 — 시작점을 옮기면 모집단이 바뀐다",
+    )
     t_collect.add_argument("--db", default=DEFAULT_DB, help=argparse.SUPPRESS)
 
     t_records = trend_sub.add_parser("records", help="원본 JSONL 에서 집계용 필드를 추출한다")
@@ -408,18 +422,44 @@ def _run_cite(args):
     return 0
 
 
+def _parse_window_to(value, window_from):
+    """--window-to 검증 (순수 함수). 문제 없으면 (value, None), 아니면 (None, 오류메시지).
+
+    형식은 YYYY-MM-DD 고정(datetime.strptime 이 실제로 파싱 가능한 날짜인지까지
+    확인 — "2026-02-30" 같은 존재하지 않는 날짜도 걸러낸다). window.from 보다
+    이르면 창이 거꾸로 뒤집혀 아무 결과도 없는 채로 census 로 기록될 수 있으므로
+    거부한다.
+    """
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        return None, f"--window-to 형식이 올바르지 않습니다 (YYYY-MM-DD): {value!r}"
+    if value < window_from:
+        return None, f"--window-to({value})가 window.from({window_from})보다 이릅니다"
+    return value, None
+
+
 def _run_trend_collect(args):
     """`paper-radar trend collect` — papers_trend/collect_openalex.py 의 main() 이식
-    + T15 의 --provider 라우팅.
+    + T15 의 --provider 라우팅 + 항목2 의 --window-to.
 
     프로파일별로 trend.collect.run()(openalex) 또는 trend.collect_pubmed.run()
     (pubmed) 을 호출한다 — 실제 수집·RunLog 기록은 거기서 한다. 여기서는
-    인자 해석과 출력만.
+    인자 해석·검증과 출력만 한다 — window 자체를 config 에 주입하는 일은
+    수집기 run() 의 window_to= 인자가 한다(브리핑: "CLI 는 얇게 유지").
     """
     if args.provider == "pubmed":
         config = trend_collect_pubmed.load_config(args.config or trend_collect_pubmed.CONFIG_PATH)
     else:
         config = trend_collect.load_config(args.config or trend_collect.CONFIG_PATH)
+
+    window_to = None
+    if args.window_to:
+        window_to, error = _parse_window_to(args.window_to, config["window"]["from"])
+        if error:
+            warn(error)
+            return 1
+
     profiles = config["profiles"]
     wanted = list(profiles) if args.profile == "all" else [args.profile]
     unknown = [name for name in wanted if name not in profiles]
@@ -447,11 +487,15 @@ def _run_trend_collect(args):
 
     if args.dry_run:
         if args.provider == "pubmed":
-            results = trend_collect_pubmed.run(wanted, config, db_path=args.db, dry_run=True)
+            results = trend_collect_pubmed.run(
+                wanted, config, db_path=args.db, dry_run=True, window_to=window_to
+            )
             for query_id, info in results.items():
                 print(f"[{query_id}] {info['count']:,}건 ({info['months']}개월 창)")
             return 0
-        results = trend_collect.run(wanted, config, db_path=args.db, dry_run=True)
+        results = trend_collect.run(
+            wanted, config, db_path=args.db, dry_run=True, window_to=window_to
+        )
         for query_id, info in results.items():
             count = info["count"]
             if count is None:
@@ -462,10 +506,12 @@ def _run_trend_collect(args):
 
     if args.provider == "pubmed":
         results = trend_collect_pubmed.run(
-            wanted, config, db_path=args.db, max_months=args.max_months
+            wanted, config, db_path=args.db, max_months=args.max_months, window_to=window_to
         )
     else:
-        results = trend_collect.run(wanted, config, db_path=args.db, max_pages=args.max_pages)
+        results = trend_collect.run(
+            wanted, config, db_path=args.db, max_pages=args.max_pages, window_to=window_to
+        )
     if any(meta is None for meta in results.values()):
         return 1
     if any((meta or {}).get("stopped_reason") for meta in results.values()):

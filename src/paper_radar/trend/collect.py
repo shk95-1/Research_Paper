@@ -533,6 +533,7 @@ def run(
     verbose=True,
     provider=records.DEFAULT_PROVIDER,
     transport=None,
+    window_to=None,
 ):
     """profiles(query_id 목록)를 순회하며 수집한다.
 
@@ -541,7 +542,17 @@ def run(
     불러 각자 독립된 run 으로 기록한다(하나의 CLI 호출이 여러 프로파일을
     수집해도, RunLog 의 run_source 는 run_id+source 가 키라 프로파일마다
     run_id 를 분리해야 서로 덮어쓰지 않는다).
+
+    window_to: 주어지면 이번 실행에 한해 config["window"]["to"] 를 덮는다
+    (항목2) — config 딕셔너리는 새로 만들 뿐, 호출자가 넘긴 원본이나
+    config.json 파일은 건드리지 않는다. cron 자동화(tool/monthly_collect.py)
+    가 매달 config.json 을 sed 로 고치는 위험을 피하려는 것이다. 인자
+    해석·형식 검증은 cli.py 가 하고, 여기서는 이미 검증된 값을 그대로
+    주입만 한다. window_from 은 없다 — 시작점을 옮기면 모집단이 바뀌어
+    과거 CSV 와의 조인이 깨진다(cli.py 의 --window-to 도움말과 같은 근거).
     """
+    if window_to is not None:
+        config = dict(config, window=dict(config["window"], to=window_to))
     transport = transport or Transport()
     per_page = config.get("per_page", 200)
 

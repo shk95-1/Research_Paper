@@ -614,6 +614,7 @@ def run(
     dry_run=False,
     verbose=True,
     transport=None,
+    window_to=None,
 ):
     """profiles(query_id 목록)를 순회하며 pubmed_query 로 수집한다.
 
@@ -621,7 +622,14 @@ def run(
     profile 에 pubmed_query 가 없으면 호출자(CLI)가 미리 걸러야 한다(이
     함수는 그 검증을 하지 않는다 — config["profiles"][query_id]["pubmed_query"]
     가 없으면 KeyError 로 바로 실패한다).
+
+    window_to: trend/collect.py 의 run() 과 같은 뜻 — 이번 실행에 한해
+    config["window"]["to"] 를 덮는다(항목2). month_list()/month_bounds() 가
+    config["window"] 로 월 목록을 만들므로, 여기서 덮으면 그 아래로 그대로
+    전파된다. config.json 파일은 쓰지 않는다.
     """
+    if window_to is not None:
+        config = dict(config, window=dict(config["window"], to=window_to))
     transport = transport or Transport()
 
     if not os.environ.get("NCBI_API_KEY", "").strip():

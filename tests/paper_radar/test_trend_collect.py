@@ -393,5 +393,30 @@ class RunLogWiringTest(_CollectTestCase):
         self.assertFalse(Path(self.db_path).exists())
 
 
+class WindowToOverrideTest(_CollectTestCase):
+    """항목2: --window-to 가 실제 요청 필터·_meta.json·원본 config 불변에 반영되는지."""
+
+    def test_window_to_overrides_the_to_publication_date_filter(self):
+        clock, sleep, _ = make_clock_and_sleep()
+        session = FakeSession([_count(1), _page([{"id": "https://openalex.org/W1"}])])
+        transport = Transport(session=session, clock=clock, sleep=sleep)
+        original_to = self.config["window"]["to"]
+        results = collect.run(
+            ["demo"], self.config, db_path=self.db_path, transport=transport, window_to="2024-06-30"
+        )
+
+        filter_value = dict(session.calls[0]["params"])["filter"]
+        self.assertIn("to_publication_date:2024-06-30", filter_value)
+        self.assertEqual(results["demo"]["window"]["to"], "2024-06-30")
+        # 호출자가 넘긴 원본 config 딕셔너리는 건드리지 않는다(config.json 을
+        # 쓰지 않는다는 브리핑 제약과 같은 방향 — 여기서는 인메모리 원본도 그대로).
+        self.assertEqual(self.config["window"]["to"], original_to)
+
+    def test_without_window_to_the_existing_window_is_unchanged(self):
+        transport = self._transport([_count(1), _page([{"id": "https://openalex.org/W1"}])])
+        results = collect.run(["demo"], self.config, db_path=self.db_path, transport=transport)
+        self.assertEqual(results["demo"]["window"]["to"], self.config["window"]["to"])
+
+
 if __name__ == "__main__":
     unittest.main()

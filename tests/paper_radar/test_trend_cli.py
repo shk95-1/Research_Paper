@@ -324,6 +324,104 @@ class TrendCollectOutputTest(unittest.TestCase):
         self.assertEqual(exit_code, 0)
 
 
+class TrendCollectWindowToFlagTest(unittest.TestCase):
+    """항목2: --window-to 인자 파싱·검증·수집기 호출 전달. 네트워크는 mock 으로 대체한다."""
+
+    def _config(self):
+        return {
+            "profiles": {"demo": {"query": "demo"}},
+            "window": {"from": "2023-01-01", "to": "2026-08-31"},
+            "per_page": 200,
+        }
+
+    def test_parse_args_reads_window_to(self):
+        args = cli.parse_args(["trend", "collect", "--window-to", "2026-07-31"])
+        self.assertEqual(args.window_to, "2026-07-31")
+
+    def test_defaults_to_none_when_omitted(self):
+        args = cli.parse_args(["trend", "collect"])
+        self.assertIsNone(args.window_to)
+
+    def test_is_passed_through_to_collect_run(self):
+        with (
+            mock.patch.object(cli.trend_collect, "load_config", return_value=self._config()),
+            mock.patch.object(
+                cli.trend_collect, "run", return_value={"demo": {"stopped_reason": None}}
+            ) as run_mock,
+        ):
+            exit_code = cli.run(
+                cli.parse_args(
+                    ["trend", "collect", "--profile", "demo", "--window-to", "2026-07-31"]
+                )
+            )
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(run_mock.call_args.kwargs["window_to"], "2026-07-31")
+
+    def test_omitted_flag_passes_none_through_unchanged_behavior(self):
+        with (
+            mock.patch.object(cli.trend_collect, "load_config", return_value=self._config()),
+            mock.patch.object(
+                cli.trend_collect, "run", return_value={"demo": {"stopped_reason": None}}
+            ) as run_mock,
+        ):
+            cli.run(cli.parse_args(["trend", "collect", "--profile", "demo"]))
+        self.assertIsNone(run_mock.call_args.kwargs["window_to"])
+
+    def test_invalid_format_exits_with_code_one(self):
+        with mock.patch.object(cli.trend_collect, "load_config", return_value=self._config()):
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                exit_code = cli.run(
+                    cli.parse_args(
+                        ["trend", "collect", "--profile", "demo", "--window-to", "2026/07/31"]
+                    )
+                )
+        self.assertEqual(exit_code, 1)
+        self.assertIn("YYYY-MM-DD", stderr.getvalue())
+
+    def test_earlier_than_window_from_exits_with_code_one(self):
+        with mock.patch.object(cli.trend_collect, "load_config", return_value=self._config()):
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                exit_code = cli.run(
+                    cli.parse_args(
+                        ["trend", "collect", "--profile", "demo", "--window-to", "2020-01-01"]
+                    )
+                )
+        self.assertEqual(exit_code, 1)
+        self.assertIn("window.from", stderr.getvalue())
+
+    def test_is_also_passed_through_for_the_pubmed_provider(self):
+        config = {
+            "profiles": {"sunscreen": {"query": "q", "pubmed_query": "pq"}},
+            "window": {"from": "2024-01-01", "to": "2024-01-31"},
+        }
+        with (
+            mock.patch.object(cli.trend_collect_pubmed, "load_config", return_value=config),
+            mock.patch.object(
+                cli.trend_collect_pubmed,
+                "run",
+                return_value={"sunscreen": {"stopped_reason": None}},
+            ) as run_mock,
+        ):
+            exit_code = cli.run(
+                cli.parse_args(
+                    [
+                        "trend",
+                        "collect",
+                        "--profile",
+                        "sunscreen",
+                        "--provider",
+                        "pubmed",
+                        "--window-to",
+                        "2024-02-29",
+                    ]
+                )
+            )
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(run_mock.call_args.kwargs["window_to"], "2024-02-29")
+
+
 class TrendCollectPubmedProviderRoutingTest(unittest.TestCase):
     """T15: --provider pubmed 는 trend_collect(openalex)가 아니라
     trend_collect_pubmed 를 부른다. 네트워크는 mock 으로 대체한다."""

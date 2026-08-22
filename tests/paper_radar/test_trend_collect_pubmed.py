@@ -442,6 +442,32 @@ class RateLimitBackoffTest(_CollectPubmedTestCase):
         self.assertTrue(self.sleep_calls)  # 백오프가 실제로 걸렸다(가짜 sleep 이 기록됨)
 
 
+class WindowToOverrideTest(_CollectPubmedTestCase):
+    """항목2: --window-to 가 month_list()/month_bounds() 로 그대로 전파되는지."""
+
+    def test_window_to_extends_the_month_list_and_the_esearch_maxdate(self):
+        # self.config 의 window 는 2024-01 한 달뿐이다 — window_to 로 2월까지
+        # 늘리면 두 번째 달이 새로 생기고, 그 달의 esearch maxdate 도 늘어난
+        # 값(2024-02-29)을 그대로 받아야 한다.
+        transport, session = self._transport(
+            [_esearch(["1"], 1), _efetch(["1"]), _esearch(["2"], 1), _efetch(["2"])]
+        )
+        results = collect_pubmed.run(
+            ["demo"],
+            self.config,
+            db_path=self.db_path,
+            transport=transport,
+            window_to="2024-02-29",
+        )
+
+        self.assertEqual(set(results["demo"]["months"]), {"2024-01", "2024-02"})
+        self.assertEqual(results["demo"]["window"]["to"], "2024-02-29")
+        second_esearch_params = dict(session.calls[2]["params"])
+        self.assertEqual(second_esearch_params["maxdate"], "2024-02-29")
+        # 호출자가 넘긴 원본 config 는 건드리지 않는다.
+        self.assertEqual(self.config["window"]["to"], "2024-01-31")
+
+
 class RunLogWiringTest(_CollectPubmedTestCase):
     def test_records_a_run_run_source_and_fetch_log_rows(self):
         transport = self._transport([_esearch(["1"], 1), _efetch(["1"])])[0]
